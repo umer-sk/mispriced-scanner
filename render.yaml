@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: qqq-scanner-backend
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SCHWAB_APP_KEY
+        sync: false
+      - key: SCHWAB_APP_SECRET
+        sync: false
+      - key: SCHWAB_CALLBACK_URL
+        value: https://127.0.0.1
+      - key: SCHWAB_TOKEN_PATH
+        value: /etc/secrets/token.json
+      - key: ALLOWED_ORIGIN
+        sync: false
