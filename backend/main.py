@@ -74,11 +74,8 @@ def _is_weekday() -> bool:
     return datetime.now(ET).weekday() < 5
 
 
-async def scan_all() -> None:
-    """Main scan routine — called by scheduler 3× per morning."""
-    if not _is_weekday():
-        logger.info("Skipping scan — weekend")
-        return
+async def _run_scan() -> None:
+    """Core scan logic — no day/time guards."""
 
     logger.info("Starting full scan of %d symbols", len(QQQ_TOP30))
     t_start = time.monotonic()
@@ -122,6 +119,14 @@ async def scan_all() -> None:
 
     except Exception as e:
         logger.exception("Scan failed: %s", e)
+
+
+async def scan_all() -> None:
+    """Scheduled scan — skips weekends."""
+    if not _is_weekday():
+        logger.info("Skipping scan — weekend")
+        return
+    await _run_scan()
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +235,7 @@ async def get_opportunities(
 @app.get("/scan")
 @limiter.limit("5/minute")
 async def trigger_scan(request: Request, background_tasks: BackgroundTasks):
-    background_tasks.add_task(scan_all)
+    background_tasks.add_task(_run_scan)
     return {"status": "scan started"}
 
 
