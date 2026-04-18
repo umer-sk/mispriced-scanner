@@ -16,8 +16,8 @@ function scoreColor(score) {
   return '#ff4444'
 }
 
-export default function OpportunityCard({ setup, onSaveToJournal }) {
-  const [expanded, setExpanded] = useState(false)
+export default function OpportunityCard({ setup, onSaveToJournal, defaultExpanded = false }) {
+  const [expanded, setExpanded] = useState(defaultExpanded)
   const [copied, setCopied] = useState(false)
 
   const {

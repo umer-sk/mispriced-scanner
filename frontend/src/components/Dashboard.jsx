@@ -2,6 +2,7 @@ import { useState } from 'react'
 import MarketContext from './MarketContext.jsx'
 import FilterBar from './FilterBar.jsx'
 import OpportunityCard from './OpportunityCard.jsx'
+import OpportunityTable from './OpportunityTable.jsx'
 
 const DATA_STALE_THRESHOLD = 90 * 60  // 90 minutes in seconds
 
@@ -45,6 +46,7 @@ function SkeletonCard() {
 
 export default function Dashboard({ data, loading, error, filters, onFiltersChange, onRefresh }) {
   const [saveTarget, setSaveTarget] = useState(null)
+  const [view, setView] = useState('table')
   const [contractCount, setContractCount] = useState(1)
   const [notes, setNotes] = useState('')
 
@@ -108,6 +110,18 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
           <span style={{ color: '#555', fontSize: '12px', fontFamily: 'monospace' }}>
             Last scan: {scanTime}
           </span>
+          <div style={styles.viewToggle}>
+            <button
+              style={{ ...styles.viewBtn, ...(view === 'table' ? styles.viewBtnActive : {}) }}
+              onClick={() => setView('table')}
+              title="Table view"
+            >⊞ TABLE</button>
+            <button
+              style={{ ...styles.viewBtn, ...(view === 'cards' ? styles.viewBtnActive : {}) }}
+              onClick={() => setView('cards')}
+              title="Card view"
+            >≡ CARDS</button>
+          </div>
           <button style={styles.refreshBtn} onClick={onRefresh}>↻</button>
         </div>
       </div>
@@ -141,26 +155,29 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
         </div>
       )}
 
-      {/* Opportunity cards */}
-      <div style={{ paddingBottom: '32px' }}>
-        {loading && !data && (
-          <>
-            <SkeletonCard /><SkeletonCard /><SkeletonCard />
-          </>
-        )}
-        {!loading && sorted.length === 0 && (
-          <div style={styles.empty}>
-            No opportunities match your filters. Try lowering the minimum score or R:R.
-          </div>
-        )}
-        {sorted.map((setup, i) => (
-          <OpportunityCard
-            key={`${setup.symbol}-${setup.signal.detector}-${i}`}
-            setup={setup}
-            onSaveToJournal={saveToJournal}
-          />
-        ))}
-      </div>
+      {/* Opportunities */}
+      {loading && !data ? (
+        <div style={{ paddingBottom: '32px' }}>
+          <SkeletonCard /><SkeletonCard /><SkeletonCard />
+        </div>
+      ) : view === 'table' ? (
+        <OpportunityTable opportunities={sorted} onSaveToJournal={saveToJournal} />
+      ) : (
+        <div style={{ paddingBottom: '32px' }}>
+          {sorted.length === 0 && (
+            <div style={styles.empty}>
+              No opportunities match your filters. Try lowering the minimum score or R:R.
+            </div>
+          )}
+          {sorted.map((setup, i) => (
+            <OpportunityCard
+              key={`${setup.symbol}-${setup.signal.detector}-${i}`}
+              setup={setup}
+              onSaveToJournal={saveToJournal}
+            />
+          ))}
+        </div>
+      )}
 
       {/* Save to journal modal */}
       {saveTarget && (
@@ -240,6 +257,26 @@ const styles = {
     padding: '4px 8px',
     borderRadius: '3px',
     fontSize: '16px',
+  },
+  viewToggle: {
+    display: 'flex',
+    gap: '2px',
+  },
+  viewBtn: {
+    background: 'none',
+    border: '1px solid #2a2a3e',
+    color: '#555',
+    cursor: 'pointer',
+    padding: '3px 10px',
+    fontFamily: 'monospace',
+    fontSize: '11px',
+    letterSpacing: '0.05em',
+    borderRadius: '3px',
+  },
+  viewBtnActive: {
+    border: '1px solid #00ffaa',
+    color: '#00ffaa',
+    background: '#0a1a0f',
   },
   staleBanner: {
     background: '#1a1000',
