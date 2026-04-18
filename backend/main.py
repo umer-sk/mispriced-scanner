@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -225,6 +225,13 @@ async def get_opportunities(
         },
         headers={"X-Data-Age": str(age)},
     )
+
+
+@app.get("/scan")
+@limiter.limit("5/minute")
+async def trigger_scan(request: Request, background_tasks: BackgroundTasks):
+    background_tasks.add_task(scan_all)
+    return {"status": "scan started"}
 
 
 @app.get("/opportunity/{symbol}")
