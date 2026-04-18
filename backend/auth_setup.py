@@ -12,14 +12,16 @@ After running:
 """
 import os
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 import schwab
 
-load_dotenv()
+# Search current dir and parent dirs for .env (works when running from backend/)
+load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
 
 api_key = os.environ["SCHWAB_APP_KEY"]
 app_secret = os.environ["SCHWAB_APP_SECRET"]
-callback_url = os.environ.get("SCHWAB_CALLBACK_URL", "https://127.0.0.1")
+# Port is required — schwab-py starts a local redirect server on this port
+callback_url = os.environ.get("SCHWAB_CALLBACK_URL", "https://127.0.0.1:8182")
 token_path = os.environ.get("SCHWAB_TOKEN_PATH", "./token.json")
 
 print(f"Generating token at: {token_path}")

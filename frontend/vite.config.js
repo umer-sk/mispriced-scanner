@@ -3,6 +3,6 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  base: '/qqq-scanner/',  // Must match GitHub repo name
+  base: '/mispriced-scanner/',  // Must match GitHub repo name
   build: { outDir: 'dist' },
 })

@@ -23,7 +23,7 @@
    - Filename: `/etc/secrets/token.json`
    - Contents: paste the full contents of your local `token.json`
 6. Deploy. First deploy takes 3–5 minutes.
-7. Copy your Render service URL (e.g. `https://qqq-scanner-backend.onrender.com`)
+7. Copy your Render service URL (e.g. `https://mispriced-scanner-backend.onrender.com`)
 
 **Render free tier note:** The service spins down after 15 minutes of inactivity. The scheduled scans (8AM, 9:45AM, 11AM ET) keep it alive during the morning window. First load outside those hours may take 30–60 seconds while the server wakes up.
 
@@ -34,13 +34,13 @@
 1. Push your repo to GitHub
 2. GitHub repo → **Settings → Secrets and variables → Actions → New secret**
    - Name: `BACKEND_URL`
-   - Value: your Render URL (e.g. `https://qqq-scanner-backend.onrender.com`)
+   - Value: your Render URL (e.g. `https://mispriced-scanner-backend.onrender.com`)
 3. GitHub repo → **Settings → Pages**
    - Source: Deploy from a branch
    - Branch: `gh-pages` / `/ (root)`
    - Save
 4. On next push to main that touches `frontend/`, the deploy workflow runs automatically
-5. Dashboard URL: `https://yourusername.github.io/qqq-scanner`
+5. Dashboard URL: `https://yourusername.github.io/mispriced-scanner`
 
 ---
 
@@ -82,5 +82,5 @@ Set a weekly Sunday calendar reminder to check this.
 ## Verifying the Deployment
 
 1. Hit `https://your-render-url.onrender.com/health` — should return `{"status": "ok", ...}`
-2. Open `https://yourusername.github.io/qqq-scanner` — dashboard should load
+2. Open `https://yourusername.github.io/mispriced-scanner` — dashboard should load
 3. On the next scheduled scan time (8AM, 9:45AM, or 11AM ET), opportunities should populate

@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: qqq-scanner-backend
+    name: mispriced-scanner-backend
     env: python
     region: oregon
     plan: free
@@ -12,7 +12,7 @@ services:
       - key: SCHWAB_APP_SECRET
         sync: false
       - key: SCHWAB_CALLBACK_URL
-        value: https://127.0.0.1
+        value: https://127.0.0.1:8182
       - key: SCHWAB_TOKEN_PATH
         value: /etc/secrets/token.json
       - key: ALLOWED_ORIGIN
