@@ -405,6 +405,193 @@ def detect_move_underpricing(chain: OptionChainData) -> Optional[MispricingSigna
 
 
 # ---------------------------------------------------------------------------
+# Bearish Detector 1: Put IV Rank Cheap
+# ---------------------------------------------------------------------------
+
+def detect_put_iv_rank_cheap(chain: OptionChainData) -> Optional[MispricingSignal]:
+    """Fire when IV rank < 25%, iv30 < hv30, and put flow dominates (bearish)."""
+    if chain.stock_price == 0 or chain.iv30 == 0:
+        return None
+    if chain.iv_rank >= 25:
+        return None
+    if chain.iv30 >= chain.hv30:
+        return None
+
+    put_vol = sum(c.volume for c in chain.puts)
+    call_vol = sum(c.volume for c in chain.calls)
+    if call_vol == 0 or put_vol / max(call_vol, 1) <= 1.3:
+        return None
+
+    ivr = chain.iv_rank
+    confidence = 0.95 if ivr <= 10 else (0.85 if ivr <= 18 else 0.70)
+
+    return MispricingSignal(
+        symbol=chain.symbol,
+        detector="put_iv_rank",
+        description=(
+            f"IV rank at {ivr:.0f}% — puts pricing {chain.iv30:.1%} vol vs "
+            f"{chain.hv30:.1%} historical. Bearish flow dominant; puts cheap."
+        ),
+        confidence=confidence,
+        raw_data={
+            "iv_rank": ivr, "iv30": chain.iv30, "hv30": chain.hv30,
+            "put_call_volume_ratio": round(put_vol / max(call_vol, 1), 2),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bearish Detector 2: Skew Inversion (Puts Cheap vs Historical Skew)
+# ---------------------------------------------------------------------------
+
+def detect_skew_inversion(chain: OptionChainData) -> Optional[MispricingSignal]:
+    """
+    Fire when put/call skew is flat (< 0.03) — puts should be more expensive
+    than calls in normal equity markets. Flat skew = cheap downside protection.
+    """
+    if chain.stock_price == 0:
+        return None
+
+    def find_delta_contract(contracts, target_delta):
+        candidates = [c for c in contracts if 21 <= c.dte <= 60 and c.open_interest > 200 and c.iv > 0]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
+
+    put_10d = find_delta_contract(chain.puts, 0.10)
+    call_10d = find_delta_contract(chain.calls, 0.10)
+    if put_10d is None or call_10d is None:
+        return None
+
+    raw_skew = put_10d.iv - call_10d.iv
+    if raw_skew >= 0.03:
+        return None
+
+    return MispricingSignal(
+        symbol=chain.symbol,
+        detector="skew_inversion",
+        description=(
+            f"Put/call skew at {raw_skew:.1%} — nearly flat vs normal 5–15%. "
+            f"Market underpricing downside protection. Puts cheap relative to calls."
+        ),
+        confidence=0.75,
+        raw_data={
+            "raw_skew": round(raw_skew, 4),
+            "put_10d_iv": round(put_10d.iv, 4),
+            "call_10d_iv": round(call_10d.iv, 4),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bearish Detector 3: Put-Call Parity Violation (Put Underpriced)
+# ---------------------------------------------------------------------------
+
+def detect_put_parity_violation(chain: OptionChainData) -> Optional[MispricingSignal]:
+    """
+    P = C - S + K * e^(-rT). When actual put < theoretical put, put is underpriced.
+    """
+    if chain.stock_price == 0:
+        return None
+
+    S = chain.stock_price
+    r = RISK_FREE_RATE
+    best_violation = 0.0
+    best_signal = None
+
+    call_map = {(c.strike, c.expiry): c for c in chain.calls if 30 <= c.dte <= 60}
+    put_map  = {(p.strike, p.expiry): p for p in chain.puts  if 30 <= p.dte <= 60}
+    common_keys = set(call_map) & set(put_map)
+
+    for key in common_keys:
+        call = call_map[key]
+        put  = put_map[key]
+        K = call.strike
+        T = call.dte / 365.0
+
+        if call.open_interest < 100 or put.open_interest < 100:
+            continue
+        if _spread_pct(call) > 0.10 or _spread_pct(put) > 0.10:
+            continue
+
+        theoretical_put = call.mid - S + K * math.exp(-r * T)
+        if theoretical_put <= 0:
+            continue
+
+        violation_pct = (theoretical_put - put.mid) / theoretical_put
+        if violation_pct > 0.02 and violation_pct > best_violation:
+            best_violation = violation_pct
+            confidence = min(0.98, 0.70 + violation_pct * 5)
+            best_signal = MispricingSignal(
+                symbol=chain.symbol,
+                detector="put_parity",
+                description=(
+                    f"Put-call parity violation: ${K:.0f} put trading "
+                    f"{violation_pct:.1%} below theoretical value (DTE {call.dte}). "
+                    f"Put underpriced mathematically."
+                ),
+                confidence=confidence,
+                raw_data={
+                    "strike": K, "expiry": str(call.expiry), "dte": call.dte,
+                    "put_mid": put.mid, "theoretical_put": round(theoretical_put, 2),
+                    "violation_pct": round(violation_pct, 4),
+                    "call_mid": call.mid, "stock_price": S,
+                },
+            )
+
+    return best_signal
+
+
+# ---------------------------------------------------------------------------
+# Bearish Detector 4: Downside Move Underpricing
+# ---------------------------------------------------------------------------
+
+def detect_downside_move_underpricing(chain: OptionChainData) -> Optional[MispricingSignal]:
+    """
+    Compare ATM put cost (implied downside) vs expected historical downside.
+    """
+    if chain.stock_price == 0 or chain.hv30 == 0:
+        return None
+
+    S = chain.stock_price
+    atm_put = _atm_contract(chain.puts, S, dte_min=30, dte_max=60)
+    if atm_put is None or atm_put.ask <= 0:
+        return None
+
+    implied_downside_pct = atm_put.ask / S
+    dte = atm_put.dte
+    hv30_daily = chain.hv30 / math.sqrt(252)
+    expected_downside_pct = hv30_daily * math.sqrt(dte)
+
+    if expected_downside_pct == 0:
+        return None
+
+    ratio = implied_downside_pct / expected_downside_pct
+    if ratio >= 0.80:
+        return None
+
+    confidence = 0.90 if ratio < 0.65 else (0.75 if ratio < 0.75 else 0.60)
+
+    return MispricingSignal(
+        symbol=chain.symbol,
+        detector="downside_move",
+        description=(
+            f"ATM put implies {implied_downside_pct:.1%} downside over {dte} days, "
+            f"but historical norms suggest {expected_downside_pct:.1%}. "
+            f"Options pricing {(1-ratio):.0%} less downside than history."
+        ),
+        confidence=confidence,
+        raw_data={
+            "put_cost": round(atm_put.ask, 2),
+            "implied_downside_pct": round(implied_downside_pct, 4),
+            "expected_downside_pct": round(expected_downside_pct, 4),
+            "underpricing_ratio": round(ratio, 3),
+            "dte": dte, "hv30": round(chain.hv30, 4),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # P&L Scenario Calculator
 # ---------------------------------------------------------------------------
 
