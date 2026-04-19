@@ -15,6 +15,7 @@ from models import (
     OptionChainData,
     OptionContract,
     PnLScenario,
+    TechnicalContext,
     TradeSetup,
 )
 
@@ -344,8 +345,8 @@ def detect_move_underpricing(chain: OptionChainData) -> Optional[MispricingSigna
     S = chain.stock_price
 
     # Find nearest expiry ATM straddle (21–60 DTE)
-    atm_call = _atm_contract(chain.calls, S, dte_min=21, dte_max=60)
-    atm_put = _atm_contract(chain.puts, S, dte_min=21, dte_max=60)
+    atm_call = _atm_contract(chain.calls, S, dte_min=30, dte_max=60)
+    atm_put = _atm_contract(chain.puts, S, dte_min=30, dte_max=60)
 
     if atm_call is None or atm_put is None:
         return None
@@ -669,7 +670,7 @@ def construct_best_spread(
 
     # STEP 1 — Select expiry (28–50 DTE preferred, never < 21 or > 60)
     # If earnings within window: prefer expiry 7–14 days AFTER earnings
-    candidate_expiries = sorted(set(c.expiry for c in chain.calls if 21 <= c.dte <= 60))
+    candidate_expiries = sorted(set(c.expiry for c in chain.calls if 30 <= c.dte <= 60))
     if not candidate_expiries:
         return None
 
@@ -776,7 +777,7 @@ def construct_best_spread(
         return None
     if breakeven_move_pct > 10.0:
         return None
-    if not (21 <= dte <= 60):
+    if not (30 <= dte <= 60):
         return None
 
     # STEP 7 — Broker order string
@@ -818,6 +819,166 @@ def construct_best_spread(
         score=0,  # filled by caller
         timestamp=datetime.utcnow(),
         order_string=order_string,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bear Put Spread Constructor
+# ---------------------------------------------------------------------------
+
+def construct_bear_put_spread(
+    signal: MispricingSignal,
+    chain: OptionChainData,
+    catalyst: CatalystContext,
+) -> Optional[TradeSetup]:
+    """
+    Build optimal bear put spread. Long higher-strike put, short lower-strike put.
+    Same quality gates as bull call spread.
+    """
+    S = chain.stock_price
+    if S == 0:
+        return None
+
+    # STEP 1 — Select expiry (30–50 DTE preferred)
+    candidate_expiries = sorted(set(c.expiry for c in chain.puts if 30 <= c.dte <= 60))
+    if not candidate_expiries:
+        return None
+
+    selected_expiry = None
+    for exp in candidate_expiries:
+        dte = (exp - date.today()).days
+        if catalyst.earnings_date and catalyst.earnings_in_window:
+            days_after_earnings = (exp - catalyst.earnings_date).days
+            if 7 <= days_after_earnings <= 14:
+                selected_expiry = exp
+                break
+        if 30 <= dte <= 50:
+            selected_expiry = exp
+            break
+    if selected_expiry is None:
+        selected_expiry = candidate_expiries[0]
+
+    dte = (selected_expiry - date.today()).days
+
+    # STEP 2 — Select strikes
+    expiry_puts = sorted(
+        [c for c in chain.puts if c.expiry == selected_expiry and c.bid > 0],
+        key=lambda c: c.strike,
+        reverse=True,  # descending for puts
+    )
+    if len(expiry_puts) < 2:
+        return None
+
+    # Long leg: ATM or slightly OTM put (strike at or just below S)
+    atm_candidates = [c for c in expiry_puts if c.strike >= S * 0.98]
+    if not atm_candidates:
+        return None
+    long_leg = min(atm_candidates, key=lambda c: abs(c.strike - S))
+
+    # Short leg: further OTM put, delta 0.15–0.30 (lower strike)
+    short_candidates = [
+        c for c in expiry_puts
+        if c.strike < long_leg.strike and 0.15 <= abs(c.delta) <= 0.30
+    ]
+    if not short_candidates:
+        short_candidates = [
+            c for c in expiry_puts
+            if S * 0.82 <= c.strike <= S * 0.94
+        ]
+    if not short_candidates:
+        return None
+    short_leg = short_candidates[0]
+
+    spread_width = long_leg.strike - short_leg.strike
+    if spread_width <= 0:
+        return None
+
+    net_debit = round(long_leg.ask - short_leg.bid, 2)
+    if net_debit <= 0:
+        return None
+    if net_debit > spread_width * 0.35:
+        return None
+
+    max_gain = round(spread_width - net_debit, 2)
+    max_loss = net_debit
+    breakeven = round(long_leg.strike - net_debit, 2)
+    breakeven_move_pct = round((S - breakeven) / S * 100, 2)
+    rr_ratio = round(max_gain / max_loss, 2) if max_loss > 0 else 0.0
+    prob_profit = round(abs(long_leg.delta) * 100, 1)
+
+    # STEP 3 — Greeks
+    net_delta = round(long_leg.delta - short_leg.delta, 3)
+    net_theta = round(long_leg.theta - short_leg.theta, 3)
+    net_vega  = round(long_leg.vega  - short_leg.vega,  3)
+
+    # STEP 4 — P&L scenarios (bearish: price moves down)
+    price_moves = [-0.15, -0.10, -0.08, -0.05, -0.02, 0.0, 0.03]
+
+    def _bear_pnl_scenarios(days: int, at_expiry: bool = False) -> list:
+        out = []
+        for move in price_moves:
+            new_price = S * (1 + move)
+            label = f"Stock {move:+.0%} in {days}d" if not at_expiry else f"Stock ${new_price:.0f}"
+            if at_expiry:
+                long_val = max(0.0, long_leg.strike - new_price) * 100
+                short_val = max(0.0, short_leg.strike - new_price) * 100
+                pnl = long_val - short_val - net_debit * 100
+            else:
+                price_change = new_price - S
+                long_pnl = (long_leg.delta * price_change - abs(long_leg.theta) * days) * 100
+                short_pnl = -(short_leg.delta * price_change - abs(short_leg.theta) * days) * 100
+                pnl = long_pnl - short_pnl
+            pnl_pct = (pnl / (net_debit * 100)) * 100 if net_debit > 0 else 0.0
+            out.append(PnLScenario(
+                label=label, stock_price=round(new_price, 2),
+                pnl=round(pnl, 0), pnl_pct=round(pnl_pct, 0),
+            ))
+        return out
+
+    scenarios_5d      = _bear_pnl_scenarios(5)
+    scenarios_10d     = _bear_pnl_scenarios(10)
+    scenarios_expiry  = _bear_pnl_scenarios(dte, at_expiry=True)
+
+    # STEP 5 — Liquidity check
+    long_spread_pct  = round(_spread_pct(long_leg)  * 100, 1)
+    short_spread_pct = round(_spread_pct(short_leg) * 100, 1)
+    liquidity_ok = (
+        long_leg.open_interest  >= 100 and short_leg.open_interest >= 100
+        and long_leg.volume >= 50
+        and long_spread_pct  <= 10.0 and short_spread_pct <= 10.0
+    )
+    if not liquidity_ok:
+        return None
+
+    # STEP 6 — Quality gates
+    if rr_ratio < 2.0 or net_debit > 8.0 or breakeven_move_pct > 10.0:
+        return None
+    if not (30 <= dte <= 60):
+        return None
+
+    # STEP 7 — Order string
+    expiry_str = selected_expiry.strftime("%d %b %y").upper()
+    order_string = (
+        f"BUY +1 VERTICAL {chain.symbol} 100 {expiry_str} "
+        f"{long_leg.strike:.0f}/{short_leg.strike:.0f} PUT @{net_debit:.2f} LMT"
+    )
+
+    return TradeSetup(
+        symbol=chain.symbol, stock_price=S, signal=signal, catalyst=catalyst,
+        structure="bear_put_spread",
+        long_strike=long_leg.strike, short_strike=short_leg.strike,
+        expiry=selected_expiry, dte=dte,
+        net_debit=net_debit, max_gain=max_gain, max_loss=max_loss,
+        breakeven=breakeven, breakeven_move_pct=breakeven_move_pct,
+        rr_ratio=rr_ratio, probability_of_profit=prob_profit,
+        net_delta=net_delta, net_theta=net_theta, net_vega=net_vega,
+        long_leg_oi=long_leg.open_interest, short_leg_oi=short_leg.open_interest,
+        long_leg_volume=long_leg.volume,
+        long_leg_spread_pct=long_spread_pct, short_leg_spread_pct=short_spread_pct,
+        liquidity_ok=liquidity_ok,
+        scenarios_5d=scenarios_5d, scenarios_10d=scenarios_10d,
+        scenarios_expiry=scenarios_expiry,
+        score=0, timestamp=datetime.utcnow(), order_string=order_string,
     )
 
 
@@ -870,7 +1031,7 @@ def score_swing_quality(setup: TradeSetup) -> int:
         score += 10
 
     # Penalties
-    if setup.dte < 21:
+    if setup.dte < 30:
         score -= 20
     if setup.rr_ratio < 2.0:
         score -= 30
@@ -883,37 +1044,106 @@ def score_swing_quality(setup: TradeSetup) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Score Breakdown
+# ---------------------------------------------------------------------------
+
+def compute_score_breakdown(setup: TradeSetup) -> list[dict]:
+    """Return itemized list of score contributions for UI transparency."""
+    items = []
+
+    if setup.catalyst.earnings_in_window:
+        items.append({"label": "Earnings in window", "pts": 25})
+    if setup.catalyst.iv_expansion_likely:
+        items.append({"label": "IV expansion likely", "pts": 20})
+    if setup.signal.detector == "parity":
+        items.append({"label": "Parity violation", "pts": 20})
+    if setup.signal.detector == "put_parity":
+        items.append({"label": "Put parity violation", "pts": 20})
+    if setup.signal.raw_data.get("iv_rank", 100) < 20:
+        items.append({"label": "IV rank < 20", "pts": 15})
+    if setup.signal.detector in ("skew", "skew_inversion"):
+        items.append({"label": "Skew anomaly", "pts": 10})
+    if setup.signal.detector in ("move", "downside_move"):
+        items.append({"label": "Move underpricing", "pts": 10})
+    if setup.rr_ratio >= 3.0:
+        items.append({"label": "R:R ≥ 3.0", "pts": 20})
+    elif setup.rr_ratio >= 2.0:
+        items.append({"label": "R:R ≥ 2.0", "pts": 10})
+    if setup.breakeven_move_pct < 5.0:
+        items.append({"label": "Tight breakeven", "pts": 15})
+    if setup.net_debit <= 3.00:
+        items.append({"label": "Low debit", "pts": 10})
+    if min(setup.long_leg_oi, setup.short_leg_oi) >= 500:
+        items.append({"label": "High OI", "pts": 10})
+    if setup.long_leg_volume >= 200:
+        items.append({"label": "Good volume", "pts": 5})
+    if 28 <= setup.dte <= 50:
+        items.append({"label": "DTE 28–50", "pts": 10})
+
+    return items
+
+
+# ---------------------------------------------------------------------------
 # Run all detectors on a chain
 # ---------------------------------------------------------------------------
 
 def run_all_detectors(
     chain: OptionChainData,
     catalyst: "CatalystContext",
+    technical_context: Optional["TechnicalContext"] = None,
+    direction: str = "both",
 ) -> list[TradeSetup]:
     """
-    Run all 5 detectors on a single chain.
-    Returns list of valid, scored TradeSetup objects.
+    Run detectors based on direction:
+      - "bullish": call detectors only → bull call spread
+      - "bearish": put detectors only → bear put spread
+      - "both": all 9 detectors, each routed to its spread type
+    direction defaults to "both"; overridden by technical_context.bias when provided.
     """
-    detectors = [
+    effective_direction = direction
+    if technical_context is not None and direction == "both":
+        if technical_context.bias == "bullish":
+            effective_direction = "bullish"
+        elif technical_context.bias == "bearish":
+            effective_direction = "bearish"
+
+    bullish_detectors = [
         detect_iv_rank_cheap(chain),
         detect_skew_anomaly(chain),
         detect_parity_violation(chain),
         detect_term_structure_gap(chain, earnings_date=catalyst.earnings_date),
         detect_move_underpricing(chain),
     ]
+    bearish_detectors = [
+        detect_put_iv_rank_cheap(chain),
+        detect_skew_inversion(chain),
+        detect_put_parity_violation(chain),
+        detect_downside_move_underpricing(chain),
+    ]
+
+    if effective_direction == "bullish":
+        signals_with_constructor = [(s, construct_best_spread) for s in bullish_detectors if s]
+    elif effective_direction == "bearish":
+        signals_with_constructor = [(s, construct_bear_put_spread) for s in bearish_detectors if s]
+    else:
+        signals_with_constructor = (
+            [(s, construct_best_spread)     for s in bullish_detectors if s] +
+            [(s, construct_bear_put_spread) for s in bearish_detectors if s]
+        )
 
     setups = []
-    for signal in detectors:
-        if signal is None:
-            continue
-        setup = construct_best_spread(signal, chain, catalyst)
+    for signal, constructor in signals_with_constructor:
+        setup = constructor(signal, chain, catalyst)
         if setup is None:
             continue
         setup.score = score_swing_quality(setup)
+        setup.score_breakdown = compute_score_breakdown(setup)
+        if technical_context is not None:
+            setup.technical_context = technical_context
         setups.append(setup)
         logger.info(
-            f"{chain.symbol} [{signal.detector}] → score={setup.score} "
-            f"rr={setup.rr_ratio} debit=${setup.net_debit}"
+            "%s [%s] → score=%d rr=%.2f debit=$%.2f",
+            chain.symbol, signal.detector, setup.score, setup.rr_ratio, setup.net_debit,
         )
 
     return setups
