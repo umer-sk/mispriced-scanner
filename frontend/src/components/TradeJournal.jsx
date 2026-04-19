@@ -60,9 +60,55 @@ export default function TradeJournal() {
     ? Math.round(closed.reduce((sum, t) => sum + (t.pnl_pct || 0), 0) / closed.length)
     : null
 
+  function exportCSV() {
+    const headers = ['id','symbol','structure','contracts','entry_debit','dte',
+                     'date_saved','notes','status','exit_date','exit_credit',
+                     'pnl_dollars','pnl_pct']
+    const rows = trades.map(t =>
+      headers.map(h => JSON.stringify(t[h] ?? '')).join(',')
+    )
+    const csv = [headers.join(','), ...rows].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `trades_${new Date().toISOString().split('T')[0]}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function importCSV(e) {
+    const file = e.target.files[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => {
+      const lines = ev.target.result.trim().split('\n')
+      const headers = lines[0].split(',')
+      const imported = lines.slice(1).map(line => {
+        const vals = line.split(',').map(v => {
+          try { return JSON.parse(v) } catch { return v }
+        })
+        return Object.fromEntries(headers.map((h, i) => [h, vals[i]]))
+      })
+      const existing = trades.filter(t => !imported.find(i => i.id === t.id))
+      save([...existing, ...imported])
+    }
+    reader.readAsText(file)
+    e.target.value = ''
+  }
+
   return (
     <div style={{ padding: '16px', maxWidth: '900px' }}>
-      <div style={styles.heading}>MY TRADES</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+        <div style={styles.heading}>MY TRADES</div>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button style={styles.csvBtn} onClick={exportCSV}>Export CSV</button>
+          <label style={styles.csvBtn}>
+            Import CSV
+            <input type="file" accept=".csv" onChange={importCSV} style={{ display: 'none' }} />
+          </label>
+        </div>
+      </div>
 
       {/* Stats */}
       {closed.length > 0 && (
@@ -229,7 +275,16 @@ const styles = {
     fontWeight: 'bold',
     color: '#00ffaa',
     letterSpacing: '0.05em',
-    marginBottom: '16px',
+  },
+  csvBtn: {
+    padding: '4px 12px',
+    background: 'none',
+    border: '1px solid #2a2a3e',
+    color: '#666',
+    cursor: 'pointer',
+    fontFamily: 'monospace',
+    fontSize: '11px',
+    borderRadius: '3px',
   },
   statsRow: {
     display: 'flex',
