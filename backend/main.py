@@ -24,9 +24,11 @@ load_dotenv()
 
 from catalyst import get_catalyst_context
 from market_context import _token_age_days, get_market_context
-from models import MarketContext, TradeSetup
-from qqq_holdings import QQQ_TOP30
+from models import MarketContext, SectorData, TradeSetup
+from qqq_holdings import QQQ_TOP50
 from scanner import run_all_detectors
+from sector_analysis import get_sector_analysis
+from technical_analysis import get_technical_contexts
 from schwab_client import fetch_all_chains, fetch_option_chain
 
 logging.basicConfig(
@@ -67,6 +69,8 @@ _cache: dict = {
     "market_context": None,   # MarketContext
     "scan_timestamp": None,   # datetime
     "symbols_scanned": 0,
+    "sector_analysis": [],    # list[SectorData]
+    "sector_timestamp": None, # datetime
 }
 
 
@@ -77,7 +81,7 @@ def _is_weekday() -> bool:
 async def _run_scan() -> None:
     """Core scan logic — no day/time guards."""
 
-    logger.info("Starting full scan of %d symbols", len(QQQ_TOP30))
+    logger.info("Starting full scan of %d symbols", len(QQQ_TOP50))
     t_start = time.monotonic()
 
     try:
@@ -88,16 +92,22 @@ async def _run_scan() -> None:
         market_ctx = get_market_context(qqq_chain)
         _cache["market_context"] = market_ctx
 
-        # 2. Fetch all 30 chains
-        chains = await fetch_all_chains(QQQ_TOP30)
+        # 2. Fetch technical context for all symbols (via yfinance, not Schwab)
+        tech_contexts = await asyncio.get_event_loop().run_in_executor(
+            None, get_technical_contexts, QQQ_TOP50
+        )
 
-        # 3–5. Run detectors, construct spreads, score
+        # 3. Fetch all 50 chains
+        chains = await fetch_all_chains(QQQ_TOP50)
+
+        # 4–6. Run detectors, construct spreads, score
         all_setups: list[TradeSetup] = []
         for chain in chains:
             if chain.stock_price == 0:
                 continue
             catalyst = get_catalyst_context(chain.symbol, chain, trade_dte=35)
-            setups = run_all_detectors(chain, catalyst)
+            tech_ctx = tech_contexts.get(chain.symbol)
+            setups = run_all_detectors(chain, catalyst, technical_context=tech_ctx)
             all_setups.extend(setups)
 
         # 6. Filter
@@ -109,12 +119,12 @@ async def _run_scan() -> None:
 
         _cache["opportunities"] = filtered
         _cache["scan_timestamp"] = datetime.utcnow()
-        _cache["symbols_scanned"] = len(QQQ_TOP30)
+        _cache["symbols_scanned"] = len(QQQ_TOP50)
 
         elapsed = time.monotonic() - t_start
         logger.info(
             "Scan complete: %d symbols, %d signals total, %d opportunities, %.1fs",
-            len(QQQ_TOP30), len(all_setups), len(filtered), elapsed,
+            len(QQQ_TOP50), len(all_setups), len(filtered), elapsed,
         )
 
     except Exception as e:
@@ -129,6 +139,22 @@ async def scan_all() -> None:
     await _run_scan()
 
 
+async def refresh_sector_analysis() -> None:
+    """Refresh sector ETF data once daily. Does not require Schwab auth."""
+    if not _is_weekday():
+        return
+    try:
+        logger.info("Refreshing sector analysis")
+        sectors = await asyncio.get_event_loop().run_in_executor(
+            None, get_sector_analysis
+        )
+        _cache["sector_analysis"] = sectors
+        _cache["sector_timestamp"] = datetime.utcnow()
+        logger.info("Sector analysis updated: %d sectors", len(sectors))
+    except Exception as e:
+        logger.exception("Sector analysis refresh failed: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Scheduler — 08:00, 09:45, 11:00 AM ET on weekdays
 # ---------------------------------------------------------------------------
@@ -136,6 +162,8 @@ scheduler = AsyncIOScheduler(timezone=ET)
 scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=ET))
 scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=9, minute=45, timezone=ET))
 scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=11, minute=0, timezone=ET))
+scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=15, minute=45, timezone=ET))
+scheduler.add_job(refresh_sector_analysis, CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone=ET))
 
 
 @app.on_event("startup")
@@ -146,6 +174,7 @@ async def startup():
     from market_context import _is_market_open
     if _is_market_open() and _is_weekday():
         asyncio.create_task(scan_all())
+    asyncio.create_task(refresh_sector_analysis())
 
 
 @app.on_event("shutdown")
@@ -199,6 +228,15 @@ async def health(request: Request):
     }
 
 
+@app.get("/sector-analysis")
+@limiter.limit("10/minute")
+async def get_sector_analysis_endpoint(request: Request):
+    return JSONResponse(content={
+        "sectors": [_serialize(s) for s in _cache["sector_analysis"]],
+        "as_of": _cache["sector_timestamp"].isoformat() if _cache["sector_timestamp"] else None,
+    })
+
+
 @app.get("/opportunities")
 @limiter.limit("10/minute")
 async def get_opportunities(
@@ -207,6 +245,7 @@ async def get_opportunities(
     max_debit: float = 8.0,
     min_score: int = 55,
     detector: str = "all",
+    direction: str = "both",
 ):
     opps = _cache["opportunities"]
 
@@ -217,6 +256,11 @@ async def get_opportunities(
         and s.net_debit <= max_debit
         and s.score >= min_score
         and (detector == "all" or s.signal.detector == detector)
+        and (
+            direction == "both"
+            or (direction == "bullish" and s.structure in ("bull_call_spread", "calendar", "long_call"))
+            or (direction == "bearish" and s.structure == "bear_put_spread")
+        )
     ]
 
     age = _data_age_seconds()
