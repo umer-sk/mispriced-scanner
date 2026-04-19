@@ -66,6 +66,18 @@ class PnLScenario:
 
 
 @dataclass
+class TechnicalContext:
+    symbol: str
+    price: float
+    ma50: float
+    ma200: float
+    pct_from_ma50: float    # (price - ma50) / ma50 * 100
+    pct_from_ma200: float   # (price - ma200) / ma200 * 100
+    trend: str              # "uptrend" | "downtrend" | "mixed"
+    bias: str               # "bullish" | "bearish" | "neutral"
+
+
+@dataclass
 class TradeSetup:
     # Identity
     symbol: str
@@ -111,13 +123,13 @@ class TradeSetup:
     score: int                   # 0–100
     timestamp: datetime
 
-    # Technical context (populated when yfinance data is available)
-    technical_context: Optional["TechnicalContext"] = None
-    # Score breakdown for UI transparency
-    score_breakdown: list[dict] = field(default_factory=list)
-
     # Broker order string (copy-paste ready)
     order_string: str
+
+    # Technical context (populated when yfinance data is available)
+    technical_context: Optional[TechnicalContext] = None
+    # Score breakdown for UI transparency
+    score_breakdown: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -130,18 +142,6 @@ class MarketContext:
     scan_timestamp: datetime
     market_is_open: bool
     next_scan_time: Optional[str]
-
-
-@dataclass
-class TechnicalContext:
-    symbol: str
-    price: float
-    ma50: float
-    ma200: float
-    pct_from_ma50: float    # (price - ma50) / ma50 * 100
-    pct_from_ma200: float   # (price - ma200) / ma200 * 100
-    trend: str              # "uptrend" | "downtrend" | "mixed"
-    bias: str               # "bullish" | "bearish" | "neutral"
 
 
 @dataclass
