@@ -23,15 +23,16 @@ SECTOR_MAP: dict[str, str] = {
     "WDAY": "XLK", "TEAM": "XLK",
     # XLC — Communication Services
     "META": "XLC", "GOOGL": "XLC", "GOOG": "XLC", "NFLX": "XLC",
-    "TTWO": "XLC", "DASH": "XLC",
+    "TTWO": "XLC",
     # XLY — Consumer Discretionary
     "AMZN": "XLY", "TSLA": "XLY", "COST": "XLY", "ABNB": "XLY", "MELI": "XLY",
+    "DASH": "XLY",
     # XLV — Health Care
     "AMGN": "XLV", "ISRG": "XLV", "DXCM": "XLV",
     # XLF — Financials
-    "PYPL": "XLF", "COIN": "XLF", "VRSK": "XLF",
+    "PYPL": "XLF", "COIN": "XLF",
     # XLI — Industrials
-    "ODFL": "XLI",
+    "ODFL": "XLI", "VRSK": "XLI",
     # XLP — Consumer Staples
     "MNST": "XLP", "KDP": "XLP",
     # XLU — Utilities
@@ -39,3 +40,6 @@ SECTOR_MAP: dict[str, str] = {
     # XLRE — Real Estate
     "CSGP": "XLRE",
 }
+
+# Backwards-compatibility alias — remove after main.py is updated in Task 8
+QQQ_TOP30 = QQQ_TOP50
