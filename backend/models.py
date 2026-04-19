@@ -74,7 +74,7 @@ class TradeSetup:
     catalyst: CatalystContext
 
     # Structure
-    structure: str              # "bull_call_spread" | "calendar" | "long_call"
+    structure: str              # "bull_call_spread" | "bear_put_spread" | "calendar" | "long_call"
     long_strike: float
     short_strike: Optional[float]
     expiry: date
@@ -111,6 +111,11 @@ class TradeSetup:
     score: int                   # 0–100
     timestamp: datetime
 
+    # Technical context (populated when yfinance data is available)
+    technical_context: Optional["TechnicalContext"] = None
+    # Score breakdown for UI transparency
+    score_breakdown: list[dict] = field(default_factory=list)
+
     # Broker order string (copy-paste ready)
     order_string: str
 
@@ -125,3 +130,30 @@ class MarketContext:
     scan_timestamp: datetime
     market_is_open: bool
     next_scan_time: Optional[str]
+
+
+@dataclass
+class TechnicalContext:
+    symbol: str
+    price: float
+    ma50: float
+    ma200: float
+    pct_from_ma50: float    # (price - ma50) / ma50 * 100
+    pct_from_ma200: float   # (price - ma200) / ma200 * 100
+    trend: str              # "uptrend" | "downtrend" | "mixed"
+    bias: str               # "bullish" | "bearish" | "neutral"
+
+
+@dataclass
+class SectorData:
+    etf: str                    # e.g. "XLK"
+    name: str                   # e.g. "Technology"
+    return_1w: float
+    return_4w: float
+    return_12w: float
+    return_vs_spy_1w: float
+    return_vs_spy_4w: float
+    return_vs_spy_12w: float
+    rs_score: float             # 0–100 relative to other sectors
+    trend_direction: str        # "improving" | "deteriorating" | "stable"
+    classification: str         # "bullish" | "bearish" | "neutral"
