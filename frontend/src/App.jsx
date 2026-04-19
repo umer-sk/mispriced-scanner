@@ -1,9 +1,27 @@
 import { useState, useEffect, useCallback } from 'react'
-import { fetchOpportunities } from './api.js'
+import { fetchOpportunities, fetchSectorAnalysis } from './api.js'
 import Dashboard from './components/Dashboard.jsx'
 import TradeJournal from './components/TradeJournal.jsx'
+import SectorStrip from './components/SectorStrip.jsx'
 
 const REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes
+
+const SECTOR_MAP = {
+  NVDA:'XLK', AAPL:'XLK', MSFT:'XLK', AVGO:'XLK', AMD:'XLK',
+  ADBE:'XLK', QCOM:'XLK', INTC:'XLK', CSCO:'XLK', TXN:'XLK',
+  INTU:'XLK', MU:'XLK', AMAT:'XLK', LRCX:'XLK', MRVL:'XLK',
+  KLAC:'XLK', CDNS:'XLK', SNPS:'XLK', PLTR:'XLK', CRWD:'XLK',
+  PANW:'XLK', FTNT:'XLK', ZS:'XLK', NET:'XLK', DDOG:'XLK',
+  WDAY:'XLK', TEAM:'XLK',
+  META:'XLC', GOOGL:'XLC', GOOG:'XLC', NFLX:'XLC', TTWO:'XLC', DASH:'XLC',
+  AMZN:'XLY', TSLA:'XLY', COST:'XLY', ABNB:'XLY', MELI:'XLY',
+  AMGN:'XLV', ISRG:'XLV', DXCM:'XLV',
+  PYPL:'XLF', COIN:'XLF', VRSK:'XLF',
+  ODFL:'XLI',
+  MNST:'XLP', KDP:'XLP',
+  EXC:'XLU', AEP:'XLU',
+  CSGP:'XLRE',
+}
 
 const styles = {
   tabBar: {
@@ -35,6 +53,8 @@ export default function App() {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [sectors, setSectors] = useState([])
+  const [activeSector, setActiveSector] = useState(null)
   const [filters, setFilters] = useState({
     minRR: 2.0,
     maxDebit: 8.0,
@@ -63,6 +83,18 @@ export default function App() {
     return () => clearInterval(interval)
   }, [load])
 
+  useEffect(() => {
+    fetchSectorAnalysis()
+      .then(d => setSectors(d.sectors || []))
+      .catch(err => console.warn('Sector fetch failed:', err))
+  }, [])
+
+  const opportunities = data?.opportunities ?? []
+  const visibleOpps = activeSector
+    ? opportunities.filter(o => SECTOR_MAP[o.symbol] === activeSector)
+    : opportunities
+  const filteredData = data ? { ...data, opportunities: visibleOpps } : data
+
   return (
     <div style={{ minHeight: '100vh', background: '#030308' }}>
       <div style={styles.tabBar}>
@@ -81,14 +113,21 @@ export default function App() {
       </div>
 
       {tab === 'dashboard' && (
-        <Dashboard
-          data={data}
-          loading={loading}
-          error={error}
-          filters={filters}
-          onFiltersChange={setFilters}
-          onRefresh={load}
-        />
+        <>
+          <SectorStrip
+            sectors={sectors}
+            activeSector={activeSector}
+            onSectorClick={setActiveSector}
+          />
+          <Dashboard
+            data={filteredData}
+            loading={loading}
+            error={error}
+            filters={filters}
+            onFiltersChange={setFilters}
+            onRefresh={load}
+          />
+        </>
       )}
       {tab === 'journal' && <TradeJournal />}
     </div>
