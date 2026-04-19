@@ -90,9 +90,9 @@ def test_put_parity_fires_when_put_underpriced():
     theoretical_put = call_mid - S + K * math.exp(-r * T)  # ≈ 3.72
     # Actual put trades below theoretical
     put_mid = theoretical_put * 0.90
-    put = OptionContract(K, expiry, 35, put_mid - 0.1, put_mid + 0.1, put_mid, put_mid,
+    put = OptionContract(K, expiry, 35, put_mid - 0.05, put_mid + 0.05, put_mid, put_mid,
                          200, 500, 0.25, -0.48, 0.01, -0.05, 0.10, put_mid, False)
-    call = OptionContract(K, expiry, 35, call_mid - 0.1, call_mid + 0.1, call_mid, call_mid,
+    call = OptionContract(K, expiry, 35, call_mid - 0.05, call_mid + 0.05, call_mid, call_mid,
                           200, 500, 0.25, 0.52, 0.01, -0.05, 0.10, call_mid, False)
     chain = _make_chain(stock_price=S, puts=[put], calls=[call])
     signal = detect_put_parity_violation(chain)

@@ -511,7 +511,7 @@ def detect_put_parity_violation(chain: OptionChainData) -> Optional[MispricingSi
 
         if call.open_interest < 100 or put.open_interest < 100:
             continue
-        if _spread_pct(call) > 0.10 or _spread_pct(put) > 0.10:
+        if _spread_pct(call) > 0.05 or _spread_pct(put) > 0.05:
             continue
 
         theoretical_put = call.mid - S + K * math.exp(-r * T)
