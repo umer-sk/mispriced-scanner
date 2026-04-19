@@ -1,10 +1,20 @@
 const DETECTORS = [
-  { key: 'all', label: 'All' },
-  { key: 'iv_rank', label: 'IV Rank' },
-  { key: 'skew', label: 'Skew' },
-  { key: 'parity', label: 'Parity' },
-  { key: 'term', label: 'Term Structure' },
-  { key: 'move', label: 'Move' },
+  { key: 'all',            label: 'All' },
+  { key: 'iv_rank',        label: 'IV Rank' },
+  { key: 'skew',           label: 'Skew' },
+  { key: 'parity',         label: 'Parity' },
+  { key: 'term',           label: 'Term' },
+  { key: 'move',           label: 'Move' },
+  { key: 'put_iv_rank',    label: 'Put IV Rank' },
+  { key: 'skew_inversion', label: 'Skew Inv.' },
+  { key: 'put_parity',     label: 'Put Parity' },
+  { key: 'downside_move',  label: 'Downside' },
+]
+
+const DIRECTIONS = [
+  { key: 'both',    label: 'Both' },
+  { key: 'bullish', label: '▲ Bullish' },
+  { key: 'bearish', label: '▼ Bearish' },
 ]
 
 const SORTS = [
@@ -19,6 +29,28 @@ export default function FilterBar({ filters, onChange }) {
 
   return (
     <div style={styles.container}>
+      {/* Direction toggle */}
+      <div style={styles.row}>
+        <span style={styles.label}>DIRECTION</span>
+        <div style={styles.tabs}>
+          {DIRECTIONS.map(d => (
+            <button
+              key={d.key}
+              style={{
+                ...styles.tab,
+                ...(filters.direction === d.key ? {
+                  ...styles.tabActive,
+                  ...(d.key === 'bearish' ? { borderColor: '#ff4444', color: '#ff4444', background: '#1a0a0a' } : {}),
+                } : {}),
+              }}
+              onClick={() => set('direction', d.key)}
+            >
+              {d.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Detector tabs */}
       <div style={styles.row}>
         <span style={styles.label}>FILTER</span>

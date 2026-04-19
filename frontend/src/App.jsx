@@ -40,6 +40,7 @@ export default function App() {
     maxDebit: 8.0,
     minScore: 55,
     detector: 'all',
+    direction: 'both',
     minOI: false,
     sort: 'score',
   })
