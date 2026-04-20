@@ -1,6 +1,12 @@
 import { useState } from 'react'
 import SectorPanel from './SectorPanel.jsx'
 
+const SECTOR_NAMES = {
+  XLK: 'Tech', XLC: 'Comm', XLY: 'Cons Disc', XLV: 'Health',
+  XLF: 'Finance', XLI: 'Industrl', XLP: 'Staples', XLU: 'Utilities',
+  XLE: 'Energy', XLB: 'Materials', XLRE: 'Real Est',
+}
+
 function trendArrow(dir) {
   if (dir === 'improving') return '▲'
   if (dir === 'deteriorating') return '▼'
@@ -37,9 +43,10 @@ export default function SectorStrip({ sectors, activeSector, onSectorClick }) {
                 onClick={() => onSectorClick(isActive ? null : s.etf)}
               >
                 <span style={{ ...styles.etf, color }}>{s.etf}</span>
+                <span style={{ ...styles.name }}>{SECTOR_NAMES[s.etf] ?? s.etf}</span>
                 <span style={{ ...styles.arrow, color }}>{trendArrow(s.trend_direction)}</span>
                 <span style={{ ...styles.ret, color }}>
-                  {s.return_vs_spy_4w >= 0 ? '+' : ''}{s.return_vs_spy_4w.toFixed(1)}%
+                  {s.return_vs_spy_4w >= 0 ? '+' : ''}{s.return_vs_spy_4w.toFixed(1)}% <span style={styles.period}>4W</span>
                 </span>
               </button>
             )
@@ -73,8 +80,10 @@ const styles = {
     background: 'none',
   },
   etf: { fontFamily: 'monospace', fontSize: '11px', fontWeight: 'bold' },
+  name: { fontFamily: 'monospace', fontSize: '10px', color: '#555' },
   arrow: { fontFamily: 'monospace', fontSize: '10px' },
   ret: { fontFamily: 'monospace', fontSize: '11px' },
+  period: { fontSize: '9px', color: '#444', fontFamily: 'monospace' },
   viewAll: {
     padding: '4px 10px', background: 'none', border: '1px solid #2a2a3e',
     color: '#555', cursor: 'pointer', fontFamily: 'monospace', fontSize: '11px',
