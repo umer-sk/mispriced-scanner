@@ -3,13 +3,21 @@ const BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
 
 export async function fetchOpportunities(filters = {}) {
   const params = new URLSearchParams({
-    min_rr: filters.minRR ?? 2.0,
-    max_debit: filters.maxDebit ?? 8.0,
-    min_score: filters.minScore ?? 55,
-    detector: filters.detector ?? 'all',
+    min_rr:    filters.minRR      ?? 2.0,
+    max_debit: filters.maxDebit   ?? 8.0,
+    min_score: filters.minScore   ?? 55,
+    detector:  filters.detector   ?? 'all',
+    direction: filters.direction  ?? 'both',
   })
+  if (filters.minOI) params.set('min_oi', '100')
   const res = await fetch(`${BASE_URL}/opportunities?${params}`)
   if (!res.ok) throw new Error(`API error: ${res.status}`)
+  return res.json()
+}
+
+export async function fetchSectorAnalysis() {
+  const res = await fetch(`${BASE_URL}/sector-analysis`)
+  if (!res.ok) throw new Error(`Sector analysis error: ${res.status}`)
   return res.json()
 }
 
