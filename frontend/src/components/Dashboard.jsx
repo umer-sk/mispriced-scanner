@@ -75,7 +75,7 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
     journal.push({
       id: crypto.randomUUID(),
       symbol: saveTarget.symbol,
-      structure: `Bull Call Spread ${new Date(saveTarget.expiry + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} $${saveTarget.long_strike}/$${saveTarget.short_strike}`,
+      structure: `${({ bull_call_spread: 'Bull Call Spread', bear_put_spread: 'Bear Put Spread', calendar: 'Calendar Spread', long_call: 'Long Call' }[saveTarget.structure] ?? saveTarget.structure)} ${new Date(saveTarget.expiry + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} $${saveTarget.long_strike}/$${saveTarget.short_strike}`,
       entry_date: new Date().toISOString().split('T')[0],
       entry_debit: saveTarget.net_debit,
       contracts: contractCount,
