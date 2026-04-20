@@ -60,20 +60,21 @@ def _safe_int(val, default: int = 0) -> int:
 
 
 def _parse_contracts(raw_map: dict, stock_price: float) -> list[OptionContract]:
-    """Parse Schwab option chain map into OptionContract list."""
+    """Parse Schwab option chain map into OptionContract list.
+    Schwab format: {expiry_str:days -> {strike_str -> [contracts]}}
+    """
     contracts = []
-    for strike_str, expiry_map in raw_map.items():
-        strike = float(strike_str)
-        for exp_str, contract_list in expiry_map.items():
+    for exp_str, strike_map in raw_map.items():
+        try:
+            exp_date = datetime.strptime(exp_str.split(":")[0], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        for strike_str, contract_list in strike_map.items():
+            try:
+                strike = float(strike_str)
+            except ValueError:
+                continue
             for c in contract_list:
-                try:
-                    exp_date = datetime.strptime(c.get("expirationDate", ""), "%Y-%m-%d").date()
-                except ValueError:
-                    # Try alternate format from Schwab response
-                    try:
-                        exp_date = datetime.strptime(exp_str.split(":")[0], "%Y-%m-%d").date()
-                    except ValueError:
-                        continue
 
                 dte = (exp_date - date.today()).days
                 if dte < 0:
