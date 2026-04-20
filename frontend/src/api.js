@@ -21,6 +21,12 @@ export async function fetchSectorAnalysis() {
   return res.json()
 }
 
+export async function triggerScan() {
+  const res = await fetch(`${BASE_URL}/scan`)
+  if (!res.ok) throw new Error(`Scan failed: ${res.status}`)
+  return res.json()
+}
+
 export async function fetchHealth() {
   const res = await fetch(`${BASE_URL}/health`)
   if (!res.ok) throw new Error(`Health check failed: ${res.status}`)

@@ -3,6 +3,7 @@ import MarketContext from './MarketContext.jsx'
 import FilterBar from './FilterBar.jsx'
 import OpportunityCard from './OpportunityCard.jsx'
 import OpportunityTable from './OpportunityTable.jsx'
+import { triggerScan } from '../api.js'
 
 const DATA_STALE_THRESHOLD = 90 * 60  // 90 minutes in seconds
 
@@ -49,6 +50,19 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
   const [view, setView] = useState('table')
   const [contractCount, setContractCount] = useState(1)
   const [notes, setNotes] = useState('')
+  const [scanning, setScanning] = useState(false)
+
+  async function runScan() {
+    setScanning(true)
+    try {
+      await triggerScan()
+      await onRefresh()
+    } catch (e) {
+      // error shown by onRefresh
+    } finally {
+      setScanning(false)
+    }
+  }
 
   const marketOpen = isMarketOpen()
   const ageSeconds = data?.data_age_seconds ?? -1
@@ -122,6 +136,13 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
               title="Card view"
             >≡ CARDS</button>
           </div>
+          <button
+            style={{ ...styles.scanBtn, ...(scanning ? styles.scanBtnActive : {}) }}
+            onClick={runScan}
+            disabled={scanning}
+          >
+            {scanning ? '⟳ SCANNING…' : '▶ RUN SCAN'}
+          </button>
           <button style={styles.refreshBtn} onClick={onRefresh}>↻</button>
         </div>
       </div>
@@ -248,6 +269,22 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     gap: '16px',
+  },
+  scanBtn: {
+    background: 'none',
+    border: '1px solid #00ffaa',
+    color: '#00ffaa',
+    cursor: 'pointer',
+    padding: '4px 12px',
+    borderRadius: '3px',
+    fontFamily: 'monospace',
+    fontSize: '11px',
+    letterSpacing: '0.05em',
+  },
+  scanBtnActive: {
+    color: '#555',
+    borderColor: '#333',
+    cursor: 'not-allowed',
   },
   refreshBtn: {
     background: 'none',
