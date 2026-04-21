@@ -157,3 +157,38 @@ class SectorData:
     rs_score: float             # 0–100 relative to other sectors
     trend_direction: str        # "improving" | "deteriorating" | "stable"
     classification: str         # "bullish" | "bearish" | "neutral"
+
+
+@dataclass
+class TechnicalSetup:
+    # Identity
+    symbol: str
+    stock_price: float
+    direction: str              # "bullish" | "bearish"
+    signal_count: int           # 5, 6, or 7
+
+    # Which of the 7 signals fired (True = bullish for that signal)
+    signal_details: dict        # keys: stage2, ema_alignment, price_vs_ema21,
+                                #       rsi_zone, volume_accum, rs_vs_qqq, breakout
+
+    # Structure
+    structure: str              # "long_call" | "long_put" | "bull_call_spread" | "bear_put_spread"
+    strike: float               # long leg strike
+    short_strike: Optional[float]  # None for outright calls/puts
+    expiry: date
+    dte: int
+    delta: float                # long leg delta (raw, negative for puts)
+    iv_rank: float
+
+    # Economics
+    premium: float              # net debit per spread, or ask for outright (per-share)
+    price_target: float         # ATR-based target
+    rr_ratio: float
+    max_loss: float             # dollars per contract
+    breakeven_move_pct: float   # % stock must move to break even
+    probability_of_profit: int  # approx %, delta * 100
+
+    # Execution
+    order_string: str
+
+    earnings_within_dte: bool = False  # always False (filtered out), kept for transparency

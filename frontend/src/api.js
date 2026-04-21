@@ -32,3 +32,26 @@ export async function fetchHealth() {
   if (!res.ok) throw new Error(`Health check failed: ${res.status}`)
   return res.json()
 }
+
+export async function fetchSectorAnalysis() {
+  const res = await fetch(`${BASE_URL}/sector-analysis`)
+  if (!res.ok) throw new Error(`Sector analysis failed: ${res.status}`)
+  return res.json()
+}
+
+export async function fetchTechnicalSetups(filters = {}) {
+  const params = new URLSearchParams({
+    direction: filters.direction ?? 'both',
+    min_rr:    filters.minRR     ?? 2.0,
+    sort:      filters.sort      ?? 'rr',
+  })
+  const res = await fetch(`${BASE_URL}/technical-setups?${params}`)
+  if (!res.ok) throw new Error(`Technical setups error: ${res.status}`)
+  return res.json()
+}
+
+export async function triggerSetupsScan() {
+  const res = await fetch(`${BASE_URL}/scan-setups`)
+  if (!res.ok) throw new Error(`Setups scan failed: ${res.status}`)
+  return res.json()
+}

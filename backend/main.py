@@ -29,6 +29,7 @@ from qqq_holdings import QQQ_TOP50
 from scanner import run_all_detectors
 from sector_analysis import get_sector_analysis
 from technical_analysis import get_technical_contexts
+from technical_scanner import scan_technical_setups
 from schwab_client import fetch_all_chains, fetch_option_chain
 
 logging.basicConfig(
@@ -71,6 +72,9 @@ _cache: dict = {
     "symbols_scanned": 0,
     "sector_analysis": [],    # list[SectorData]
     "sector_timestamp": None, # datetime
+    "technical_setups": [],   # list[TechnicalSetup]
+    "technical_timestamp": None, # datetime
+    "technical_symbols_scanned": 0,  # int
 }
 
 
@@ -129,6 +133,24 @@ async def _run_scan() -> None:
 
     except Exception as e:
         logger.exception("Scan failed: %s", e)
+
+
+async def _run_technical_scan() -> None:
+    """Fetch price history + option chains for all symbols, find technical setups."""
+    t_start = time.monotonic()
+    logger.info("Starting technical scan of %d symbols", len(QQQ_TOP50))
+    try:
+        loop = asyncio.get_event_loop()
+        setups = await loop.run_in_executor(
+            None, scan_technical_setups, QQQ_TOP50, 2.0, "both"
+        )
+        _cache["technical_setups"] = setups
+        _cache["technical_timestamp"] = datetime.utcnow()
+        _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
+        elapsed = time.monotonic() - t_start
+        logger.info("Technical scan complete: %d setups, %.1fs", len(setups), elapsed)
+    except Exception as e:
+        logger.error("Technical scan failed: %s", e)
 
 
 async def scan_all() -> None:
@@ -235,6 +257,42 @@ async def get_sector_analysis_endpoint(request: Request):
         "sectors": [_serialize(s) for s in _cache["sector_analysis"]],
         "as_of": _cache["sector_timestamp"].isoformat() if _cache["sector_timestamp"] else None,
     })
+
+
+@app.get("/technical-setups")
+@limiter.limit("60/minute")
+async def get_technical_setups(
+    request: Request,
+    direction: str = "both",
+    min_rr: float = 2.0,
+    sort: str = "rr",
+):
+    setups = _cache["technical_setups"]
+    ts = _cache["technical_timestamp"]
+
+    filtered = [
+        s for s in setups
+        if s.rr_ratio >= min_rr
+        and (direction == "both" or s.direction == direction)
+    ]
+
+    if sort == "pop":
+        filtered.sort(key=lambda s: s.probability_of_profit, reverse=True)
+    else:
+        filtered.sort(key=lambda s: s.rr_ratio, reverse=True)
+
+    return JSONResponse(content={
+        "setups": [_serialize(s) for s in filtered],
+        "scan_timestamp": ts.isoformat() if ts else None,
+        "symbols_scanned": _cache.get("technical_symbols_scanned", 0),
+    })
+
+
+@app.get("/scan-setups")
+@limiter.limit("6/minute")
+async def trigger_technical_scan(request: Request, background_tasks: BackgroundTasks):
+    background_tasks.add_task(_run_technical_scan)
+    return JSONResponse(content={"status": "scanning", "message": "Technical scan started. Fetch /technical-setups in ~45s."})
 
 
 @app.get("/opportunities")
