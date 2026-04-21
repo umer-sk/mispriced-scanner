@@ -3,6 +3,7 @@ import { fetchOpportunities, fetchSectorAnalysis } from './api.js'
 import Dashboard from './components/Dashboard.jsx'
 import TradeJournal from './components/TradeJournal.jsx'
 import SectorStrip from './components/SectorStrip.jsx'
+import TechnicalSetups from './components/TechnicalSetups.jsx'
 
 const REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes
 
@@ -105,6 +106,12 @@ export default function App() {
           SCANNER
         </button>
         <button
+          style={{ ...styles.tab, ...(tab === 'setups' ? styles.tabActive : {}) }}
+          onClick={() => setTab('setups')}
+        >
+          SETUPS
+        </button>
+        <button
           style={{ ...styles.tab, ...(tab === 'journal' ? styles.tabActive : {}) }}
           onClick={() => setTab('journal')}
         >
@@ -129,6 +136,7 @@ export default function App() {
           />
         </>
       )}
+      {tab === 'setups' && <TechnicalSetups />}
       {tab === 'journal' && <TradeJournal />}
     </div>
   )
