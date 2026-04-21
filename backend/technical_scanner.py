@@ -122,3 +122,295 @@ def score_signals(
 
     net_score = sum(1 if v else -1 for v in details.values())
     return net_score, details
+
+
+# ---------------------------------------------------------------------------
+# Options structure helpers
+# ---------------------------------------------------------------------------
+
+def _find_delta_contract(
+    contracts: list,
+    target_delta: float,
+    dte_min: int = 30,
+    dte_max: int = 60,
+) -> Optional[object]:
+    """Find the contract whose abs(delta) is closest to target_delta."""
+    candidates = [
+        c for c in contracts
+        if dte_min <= c.dte <= dte_max and c.bid > 0 and c.iv > 0
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
+
+
+def _construct_long_call(
+    symbol: str,
+    stock_price: float,
+    chain,
+    signal_count: int,
+    signal_details: dict,
+    atr14: float,
+) -> Optional[TechnicalSetup]:
+    """Long call at ~0.45 delta, 30–60 DTE. R:R via ATR-based price target."""
+    call = _find_delta_contract(chain.calls, 0.45)
+    if call is None:
+        return None
+
+    dte = call.dte
+    price_target = stock_price + 1.5 * atr14 * dte / 10
+    intrinsic_at_target = max(0.0, price_target - call.strike)
+    gain_at_target = intrinsic_at_target - call.ask
+    if gain_at_target <= 0:
+        return None
+
+    rr_ratio = round(gain_at_target / call.ask, 2)
+    if rr_ratio < 2.0:
+        return None
+
+    breakeven = call.strike + call.ask
+    breakeven_move_pct = round((breakeven - stock_price) / stock_price * 100, 1)
+
+    return TechnicalSetup(
+        symbol=symbol,
+        stock_price=stock_price,
+        direction="bullish",
+        signal_count=signal_count,
+        signal_details=signal_details,
+        structure="long_call",
+        strike=call.strike,
+        short_strike=None,
+        expiry=call.expiry,
+        dte=dte,
+        delta=round(call.delta, 2),
+        iv_rank=chain.iv_rank,
+        premium=call.ask,
+        price_target=round(price_target, 2),
+        rr_ratio=rr_ratio,
+        max_loss=round(call.ask * 100, 2),
+        breakeven_move_pct=breakeven_move_pct,
+        probability_of_profit=round(abs(call.delta) * 100),
+        order_string=(
+            f"BUY +1 {symbol} {call.expiry.strftime('%m/%d')} "
+            f"{call.strike:.0f} CALL @{call.ask:.2f} LMT"
+        ),
+    )
+
+
+def _construct_long_put(
+    symbol: str,
+    stock_price: float,
+    chain,
+    signal_count: int,
+    signal_details: dict,
+    atr14: float,
+) -> Optional[TechnicalSetup]:
+    """Long put at ~0.45 delta (abs), 30–60 DTE. R:R via ATR-based price target."""
+    put = _find_delta_contract(chain.puts, 0.45)
+    if put is None:
+        return None
+
+    dte = put.dte
+    price_target = stock_price - 1.5 * atr14 * dte / 10
+    intrinsic_at_target = max(0.0, put.strike - price_target)
+    gain_at_target = intrinsic_at_target - put.ask
+    if gain_at_target <= 0:
+        return None
+
+    rr_ratio = round(gain_at_target / put.ask, 2)
+    if rr_ratio < 2.0:
+        return None
+
+    breakeven = put.strike - put.ask
+    breakeven_move_pct = round((stock_price - breakeven) / stock_price * 100, 1)
+
+    return TechnicalSetup(
+        symbol=symbol,
+        stock_price=stock_price,
+        direction="bearish",
+        signal_count=signal_count,
+        signal_details=signal_details,
+        structure="long_put",
+        strike=put.strike,
+        short_strike=None,
+        expiry=put.expiry,
+        dte=dte,
+        delta=round(put.delta, 2),
+        iv_rank=chain.iv_rank,
+        premium=put.ask,
+        price_target=round(price_target, 2),
+        rr_ratio=rr_ratio,
+        max_loss=round(put.ask * 100, 2),
+        breakeven_move_pct=breakeven_move_pct,
+        probability_of_profit=round(abs(put.delta) * 100),
+        order_string=(
+            f"BUY +1 {symbol} {put.expiry.strftime('%m/%d')} "
+            f"{put.strike:.0f} PUT @{put.ask:.2f} LMT"
+        ),
+    )
+
+
+def _construct_bull_call_spread_technical(
+    symbol: str,
+    stock_price: float,
+    chain,
+    signal_count: int,
+    signal_details: dict,
+    atr14: float,
+) -> Optional[TechnicalSetup]:
+    """Bull call spread: long 0.45Δ, short 0.25Δ, same expiry."""
+    long_leg = _find_delta_contract(chain.calls, 0.45)
+    if long_leg is None:
+        return None
+
+    short_candidates = [
+        c for c in chain.calls
+        if c.expiry == long_leg.expiry and 0.20 <= abs(c.delta) <= 0.30 and c.bid > 0
+    ]
+    if not short_candidates:
+        return None
+    short_leg = min(short_candidates, key=lambda c: abs(abs(c.delta) - 0.25))
+
+    spread_width = short_leg.strike - long_leg.strike
+    if spread_width <= 0:
+        return None
+
+    net_debit = round(long_leg.ask - short_leg.bid, 2)
+    if net_debit <= 0 or net_debit > spread_width * 0.40:
+        return None
+
+    max_gain = round(spread_width - net_debit, 2)
+    rr_ratio = round(max_gain / net_debit, 2)
+    if rr_ratio < 2.0:
+        return None
+
+    breakeven = long_leg.strike + net_debit
+    breakeven_move_pct = round((breakeven - stock_price) / stock_price * 100, 1)
+    dte = long_leg.dte
+
+    return TechnicalSetup(
+        symbol=symbol,
+        stock_price=stock_price,
+        direction="bullish",
+        signal_count=signal_count,
+        signal_details=signal_details,
+        structure="bull_call_spread",
+        strike=long_leg.strike,
+        short_strike=short_leg.strike,
+        expiry=long_leg.expiry,
+        dte=dte,
+        delta=round(long_leg.delta, 2),
+        iv_rank=chain.iv_rank,
+        premium=net_debit,
+        price_target=round(stock_price + 1.5 * atr14 * dte / 10, 2),
+        rr_ratio=rr_ratio,
+        max_loss=round(net_debit * 100, 2),
+        breakeven_move_pct=breakeven_move_pct,
+        probability_of_profit=round(abs(long_leg.delta) * 100),
+        order_string=(
+            f"BUY +1 {symbol} {long_leg.expiry.strftime('%m/%d')} "
+            f"{long_leg.strike:.0f}/{short_leg.strike:.0f} CALL VRT @{net_debit:.2f} LMT"
+        ),
+    )
+
+
+def _construct_bear_put_spread_technical(
+    symbol: str,
+    stock_price: float,
+    chain,
+    signal_count: int,
+    signal_details: dict,
+    atr14: float,
+) -> Optional[TechnicalSetup]:
+    """Bear put spread: long 0.45Δ put, short 0.25Δ put, same expiry."""
+    long_leg = _find_delta_contract(chain.puts, 0.45)
+    if long_leg is None:
+        return None
+
+    short_candidates = [
+        c for c in chain.puts
+        if c.expiry == long_leg.expiry and 0.20 <= abs(c.delta) <= 0.30 and c.bid > 0
+    ]
+    if not short_candidates:
+        return None
+    short_leg = min(short_candidates, key=lambda c: abs(abs(c.delta) - 0.25))
+
+    spread_width = long_leg.strike - short_leg.strike
+    if spread_width <= 0:
+        return None
+
+    net_debit = round(long_leg.ask - short_leg.bid, 2)
+    if net_debit <= 0 or net_debit > spread_width * 0.40:
+        return None
+
+    max_gain = round(spread_width - net_debit, 2)
+    rr_ratio = round(max_gain / net_debit, 2)
+    if rr_ratio < 2.0:
+        return None
+
+    breakeven = long_leg.strike - net_debit
+    breakeven_move_pct = round((stock_price - breakeven) / stock_price * 100, 1)
+    dte = long_leg.dte
+
+    return TechnicalSetup(
+        symbol=symbol,
+        stock_price=stock_price,
+        direction="bearish",
+        signal_count=signal_count,
+        signal_details=signal_details,
+        structure="bear_put_spread",
+        strike=long_leg.strike,
+        short_strike=short_leg.strike,
+        expiry=long_leg.expiry,
+        dte=dte,
+        delta=round(long_leg.delta, 2),
+        iv_rank=chain.iv_rank,
+        premium=net_debit,
+        price_target=round(stock_price - 1.5 * atr14 * dte / 10, 2),
+        rr_ratio=rr_ratio,
+        max_loss=round(net_debit * 100, 2),
+        breakeven_move_pct=breakeven_move_pct,
+        probability_of_profit=round(abs(long_leg.delta) * 100),
+        order_string=(
+            f"BUY +1 {symbol} {long_leg.expiry.strftime('%m/%d')} "
+            f"{long_leg.strike:.0f}/{short_leg.strike:.0f} PUT VRT @{net_debit:.2f} LMT"
+        ),
+    )
+
+
+def _pick_best_structure(
+    symbol: str,
+    stock_price: float,
+    chain,
+    direction: str,
+    signal_count: int,
+    signal_details: dict,
+    atr14: float,
+) -> Optional[TechnicalSetup]:
+    """
+    Choose the best options structure based on IV rank.
+    IV rank < 50: try long call/put first, then spread
+    IV rank 50-65: try both, pick higher R:R
+    IV rank > 65: spread first, then long call/put as fallback
+    """
+    iv_rank = chain.iv_rank
+
+    if direction == "bullish":
+        long_fn = _construct_long_call
+        spread_fn = _construct_bull_call_spread_technical
+    else:
+        long_fn = _construct_long_put
+        spread_fn = _construct_bear_put_spread_technical
+
+    args = (symbol, stock_price, chain, signal_count, signal_details, atr14)
+
+    if iv_rank < 50:
+        return long_fn(*args) or spread_fn(*args)
+    elif iv_rank <= 65:
+        long_setup = long_fn(*args)
+        spread_setup = spread_fn(*args)
+        if long_setup and spread_setup:
+            return long_setup if long_setup.rr_ratio >= spread_setup.rr_ratio else spread_setup
+        return long_setup or spread_setup
+    else:
+        return spread_fn(*args) or long_fn(*args)

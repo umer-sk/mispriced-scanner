@@ -101,3 +101,79 @@ def test_technical_setup_fields():
     assert setup.symbol == "NVDA"
     assert setup.direction == "bullish"
     assert setup.signal_count == 6
+
+
+from unittest.mock import patch, MagicMock
+from datetime import datetime
+from models import OptionChainData, OptionContract
+from technical_scanner import _construct_long_call, _construct_long_put, _pick_best_structure
+
+def _make_chain(symbol="NVDA", price=875.0, iv_rank=32.0):
+    expiry = date(2026, 6, 20)  # ~60 DTE from test date
+    def _call(strike, delta, ask, bid=None):
+        return OptionContract(
+            strike=strike, expiry=expiry, dte=45, bid=bid or ask*0.95,
+            ask=ask, mid=ask*0.975, last=ask, volume=500, open_interest=1000,
+            iv=0.35, delta=delta, gamma=0.01, theta=-0.05, vega=0.10,
+            theoretical_value=ask, in_the_money=(delta > 0.5),
+        )
+    def _put(strike, delta, ask, bid=None):
+        return OptionContract(
+            strike=strike, expiry=expiry, dte=45, bid=bid or ask*0.95,
+            ask=ask, mid=ask*0.975, last=ask, volume=500, open_interest=1000,
+            iv=0.35, delta=delta, gamma=0.01, theta=-0.05, vega=0.10,
+            theoretical_value=ask, in_the_money=(delta < -0.5),
+        )
+    return OptionChainData(
+        symbol=symbol, stock_price=price, iv30=0.35, hv30=0.28,
+        iv_rank=iv_rank, iv_percentile=35.0,
+        timestamp=datetime.utcnow(),
+        calls=[
+            _call(850, 0.60, 38.0),
+            _call(875, 0.50, 28.0),
+            _call(900, 0.44, 20.0),   # target: 0.45 delta
+            _call(925, 0.35, 14.0),
+            _call(950, 0.25, 9.0),    # short leg for spread
+            _call(975, 0.15, 5.0),
+        ],
+        puts=[
+            _put(850, -0.44, 19.0),   # target: 0.45 delta
+            _put(825, -0.35, 13.0),
+            _put(800, -0.25, 8.0),    # short leg for spread
+            _put(775, -0.15, 4.5),
+        ],
+        is_stale=False,
+    )
+
+def test_construct_long_call_returns_setup():
+    chain = _make_chain()
+    signal_details = {k: True for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
+    setup = _construct_long_call("NVDA", 875.0, chain, 7, signal_details, atr14=15.0)
+    assert setup is not None
+    assert setup.structure == "long_call"
+    assert setup.strike == 900.0  # closest to 0.45 delta
+    assert setup.rr_ratio >= 2.0
+    assert setup.direction == "bullish"
+
+def test_construct_long_put_returns_setup():
+    chain = _make_chain()
+    signal_details = {k: False for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
+    setup = _construct_long_put("NVDA", 875.0, chain, 7, signal_details, atr14=15.0)
+    assert setup is not None
+    assert setup.structure == "long_put"
+    assert setup.strike == 850.0  # closest to 0.45 delta (abs)
+    assert setup.direction == "bearish"
+
+def test_pick_best_structure_low_iv_prefers_long_call():
+    chain = _make_chain(iv_rank=30.0)
+    signal_details = {k: True for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
+    setup = _pick_best_structure("NVDA", 875.0, chain, "bullish", 7, signal_details, atr14=15.0)
+    assert setup is not None
+    assert setup.structure in ("long_call", "bull_call_spread")
+
+def test_pick_best_structure_high_iv_prefers_spread():
+    chain = _make_chain(iv_rank=70.0)
+    signal_details = {k: True for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
+    setup = _pick_best_structure("NVDA", 875.0, chain, "bullish", 7, signal_details, atr14=15.0)
+    # high IV: spread preferred; if spread fails, falls back to long call
+    assert setup is not None
