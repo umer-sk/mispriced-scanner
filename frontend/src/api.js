@@ -33,12 +33,6 @@ export async function fetchHealth() {
   return res.json()
 }
 
-export async function fetchSectorAnalysis() {
-  const res = await fetch(`${BASE_URL}/sector-analysis`)
-  if (!res.ok) throw new Error(`Sector analysis failed: ${res.status}`)
-  return res.json()
-}
-
 export async function fetchTechnicalSetups(filters = {}) {
   const params = new URLSearchParams({
     direction: filters.direction ?? 'both',
