@@ -190,3 +190,5 @@ class TechnicalSetup:
 
     # Execution
     order_string: str
+
+    earnings_within_dte: bool = False  # always False (filtered out), kept for transparency
