@@ -177,3 +177,29 @@ def test_pick_best_structure_high_iv_prefers_spread():
     setup = _pick_best_structure("NVDA", 875.0, chain, "bullish", 7, signal_details, atr14=15.0)
     # high IV: spread preferred; if spread fails, falls back to long call
     assert setup is not None
+
+
+from unittest.mock import patch
+import pandas as pd
+
+def _make_yf_df(closes, n=220):
+    closes_full = ([closes[0]] * max(0, n - len(closes)) + list(closes))[-n:]
+    return pd.DataFrame({
+        'Close': closes_full,
+        'High': [c * 1.01 for c in closes_full],
+        'Low':  [c * 0.99 for c in closes_full],
+        'Open': closes_full,
+        'Volume': [1_500_000] * n,
+    })
+
+@patch('technical_scanner.yf.download')
+@patch('technical_scanner.fetch_option_chain')
+def test_scan_technical_setups_returns_list(mock_chain, mock_yf):
+    from technical_scanner import scan_technical_setups
+
+    bull_closes = [100.0 + i * 0.5 for i in range(220)]
+    mock_yf.return_value = _make_yf_df(bull_closes)
+    mock_chain.return_value = _make_chain()  # reuse existing helper
+
+    setups = scan_technical_setups(["NVDA"], min_rr=2.0, direction="both")
+    assert isinstance(setups, list)

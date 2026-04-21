@@ -13,6 +13,11 @@ import yfinance as yf
 
 from models import OptionChainData, TechnicalSetup
 
+try:
+    from schwab_client import fetch_option_chain
+except Exception:
+    fetch_option_chain = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 SIGNAL_THRESHOLD = 3
@@ -414,3 +419,100 @@ def _pick_best_structure(
         return long_setup or spread_setup
     else:
         return spread_fn(*args) or long_fn(*args)
+
+
+def scan_technical_setups(
+    symbols: list[str],
+    min_rr: float = 2.0,
+    direction: str = "both",
+) -> list[TechnicalSetup]:
+    """
+    Full technical scan:
+    1. Fetch 220-day daily OHLCV from yfinance for all symbols + QQQ
+    2. Score 7 signals per stock
+    3. For stocks with score >= SIGNAL_THRESHOLD (5+/7 agree):
+       fetch Schwab option chain, pick best structure
+    4. Filter by min_rr, sort by rr_ratio descending
+    """
+    logger.info("Technical scan: fetching price history for %d symbols", len(symbols))
+
+    all_tickers = symbols + (["QQQ"] if "QQQ" not in symbols else [])
+    try:
+        raw = yf.download(
+            tickers=all_tickers,
+            period="1y",
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+        )
+    except Exception as e:
+        logger.error("yfinance batch download failed: %s", e)
+        return []
+
+    # Extract QQQ DataFrame
+    if len(all_tickers) == 1:
+        qqq_df = raw
+    elif isinstance(raw.columns, pd.MultiIndex):
+        try:
+            qqq_df = raw.xs("QQQ", axis=1, level=1) if "QQQ" in all_tickers else raw
+        except Exception:
+            qqq_df = raw
+    else:
+        qqq_df = raw
+
+    qualifying = []
+
+    for symbol in symbols:
+        try:
+            if len(all_tickers) > 1 and isinstance(raw.columns, pd.MultiIndex):
+                df = raw.xs(symbol, axis=1, level=1).dropna()
+            else:
+                df = raw.dropna()
+
+            if len(df) < 50:
+                logger.debug("%s: insufficient price history (%d rows)", symbol, len(df))
+                continue
+
+            score, details = score_signals(symbol, df, qqq_df)
+
+            if direction == "bullish" and score < SIGNAL_THRESHOLD:
+                continue
+            if direction == "bearish" and score > -SIGNAL_THRESHOLD:
+                continue
+            if direction == "both" and abs(score) < SIGNAL_THRESHOLD:
+                continue
+
+            signal_direction = "bullish" if score >= SIGNAL_THRESHOLD else "bearish"
+            signal_count = sum(1 for v in details.values() if (
+                v if signal_direction == "bullish" else not v
+            ))
+            qualifying.append((symbol, signal_count, details, df, signal_direction))
+
+        except Exception as e:
+            logger.warning("Signal scoring failed for %s: %s", symbol, e)
+
+    logger.info("Technical scan: %d/%d symbols qualify for options check", len(qualifying), len(symbols))
+
+    setups: list[TechnicalSetup] = []
+
+    for symbol, signal_count, details, df, sig_direction in qualifying:
+        try:
+            chain = fetch_option_chain(symbol)
+            if chain.stock_price == 0:
+                continue
+
+            atr = _atr14(df)
+            setup = _pick_best_structure(
+                symbol, chain.stock_price, chain,
+                sig_direction, signal_count, details, atr,
+            )
+            if setup is None or setup.rr_ratio < min_rr:
+                continue
+            setups.append(setup)
+
+        except Exception as e:
+            logger.warning("Options structure failed for %s: %s", symbol, e)
+
+    setups.sort(key=lambda s: s.rr_ratio, reverse=True)
+    logger.info("Technical scan complete: %d setups found", len(setups))
+    return setups
