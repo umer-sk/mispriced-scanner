@@ -20,7 +20,8 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-SIGNAL_THRESHOLD = 3
+# net_score = count(True) - count(False); score of 3 means 5 agree, 2 disagree (5+/7)
+NET_SCORE_THRESHOLD = 3
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +431,7 @@ def scan_technical_setups(
     Full technical scan:
     1. Fetch 220-day daily OHLCV from yfinance for all symbols + QQQ
     2. Score 7 signals per stock
-    3. For stocks with score >= SIGNAL_THRESHOLD (5+/7 agree):
+    3. For stocks with score >= NET_SCORE_THRESHOLD (5+/7 agree):
        fetch Schwab option chain, pick best structure
     4. Filter by min_rr, sort by rr_ratio descending
     """
@@ -475,14 +476,14 @@ def scan_technical_setups(
 
             score, details = score_signals(symbol, df, qqq_df)
 
-            if direction == "bullish" and score < SIGNAL_THRESHOLD:
+            if direction == "bullish" and score < NET_SCORE_THRESHOLD:
                 continue
-            if direction == "bearish" and score > -SIGNAL_THRESHOLD:
+            if direction == "bearish" and score > -NET_SCORE_THRESHOLD:
                 continue
-            if direction == "both" and abs(score) < SIGNAL_THRESHOLD:
+            if direction == "both" and abs(score) < NET_SCORE_THRESHOLD:
                 continue
 
-            signal_direction = "bullish" if score >= SIGNAL_THRESHOLD else "bearish"
+            signal_direction = "bullish" if score >= NET_SCORE_THRESHOLD else "bearish"
             signal_count = sum(1 for v in details.values() if (
                 v if signal_direction == "bullish" else not v
             ))

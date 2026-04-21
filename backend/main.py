@@ -74,6 +74,7 @@ _cache: dict = {
     "sector_timestamp": None, # datetime
     "technical_setups": [],   # list[TechnicalSetup]
     "technical_timestamp": None, # datetime
+    "technical_symbols_scanned": 0,  # int
 }
 
 
@@ -145,6 +146,7 @@ async def _run_technical_scan() -> None:
         )
         _cache["technical_setups"] = setups
         _cache["technical_timestamp"] = datetime.utcnow()
+        _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
         elapsed = time.monotonic() - t_start
         logger.info("Technical scan complete: %d setups, %.1fs", len(setups), elapsed)
     except Exception as e:
@@ -282,7 +284,7 @@ async def get_technical_setups(
     return JSONResponse(content={
         "setups": [_serialize(s) for s in filtered],
         "scan_timestamp": ts.isoformat() if ts else None,
-        "symbols_scanned": len(_cache.get("technical_setups", [])),
+        "symbols_scanned": _cache.get("technical_symbols_scanned", 0),
     })
 
 
