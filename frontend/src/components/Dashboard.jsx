@@ -110,7 +110,7 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
 
   const scanTime = data?.scan_timestamp
     ? new Date(data.scan_timestamp).toLocaleTimeString('en-US', {
-        hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York'
+        hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles'
       })
     : '—'
 

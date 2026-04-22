@@ -185,7 +185,7 @@ export default function TechnicalSetups() {
   }
 
   const scanTime = scanTimestamp
-    ? new Date(scanTimestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York' })
+    ? new Date(scanTimestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles' })
     : '—'
 
   return (

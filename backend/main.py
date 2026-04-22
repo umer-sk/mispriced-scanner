@@ -144,11 +144,13 @@ async def _run_technical_scan() -> None:
         setups = await loop.run_in_executor(
             None, scan_technical_setups, QQQ_TOP50, 2.0, "both"
         )
-        _cache["technical_setups"] = setups
+        if setups:
+            _cache["technical_setups"] = setups
         _cache["technical_timestamp"] = datetime.utcnow()
         _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
         elapsed = time.monotonic() - t_start
-        logger.info("Technical scan complete: %d setups, %.1fs", len(setups), elapsed)
+        logger.info("Technical scan complete: %d setups (cache has %d), %.1fs",
+                    len(setups), len(_cache["technical_setups"]), elapsed)
     except Exception as e:
         logger.error("Technical scan failed: %s", e)
 
