@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import MarketContext from './MarketContext.jsx'
 import FilterBar from './FilterBar.jsx'
 import OpportunityCard from './OpportunityCard.jsx'
 import OpportunityTable from './OpportunityTable.jsx'
-import { triggerScan } from '../api.js'
+import { triggerScan, fetchHealth } from '../api.js'
 
 const DATA_STALE_THRESHOLD = 90 * 60  // 90 minutes in seconds
 
@@ -50,18 +50,52 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
   const [view, setView] = useState('table')
   const [contractCount, setContractCount] = useState(1)
   const [notes, setNotes] = useState('')
-  const [scanning, setScanning] = useState(false)
+  const [scanPhase, setScanPhase] = useState('idle') // 'idle' | 'scanning' | 'done'
+  const [elapsed, setElapsed] = useState(0)
+  const pollRef = useRef(null)
+  const elapsedTimerRef = useRef(null)
+  const fallbackRef = useRef(null)
+
+  function clearAllTimers() {
+    clearInterval(pollRef.current)
+    clearInterval(elapsedTimerRef.current)
+    clearTimeout(fallbackRef.current)
+  }
+
+  useEffect(() => () => clearAllTimers(), [])
 
   async function runScan() {
-    setScanning(true)
+    const baseline = data?.scan_timestamp ?? null
+    setScanPhase('scanning')
+    setElapsed(0)
+
     try {
       await triggerScan()
-      await onRefresh()
     } catch (e) {
-      // error shown by onRefresh
-    } finally {
-      setScanning(false)
+      setScanPhase('idle')
+      return
     }
+
+    elapsedTimerRef.current = setInterval(() => setElapsed(e => e + 1), 1000)
+
+    pollRef.current = setInterval(async () => {
+      try {
+        const health = await fetchHealth()
+        if (health.last_scan && health.last_scan !== baseline) {
+          clearAllTimers()
+          setScanPhase('done')
+          await onRefresh()
+          setTimeout(() => setScanPhase('idle'), 2000)
+        }
+      } catch (_) {}
+    }, 3000)
+
+    fallbackRef.current = setTimeout(async () => {
+      clearAllTimers()
+      setScanPhase('done')
+      await onRefresh()
+      setTimeout(() => setScanPhase('idle'), 2000)
+    }, 60000)
   }
 
   const marketOpen = isMarketOpen()
@@ -137,15 +171,32 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
             >≡ CARDS</button>
           </div>
           <button
-            style={{ ...styles.scanBtn, ...(scanning ? styles.scanBtnActive : {}) }}
+            style={{
+              ...styles.scanBtn,
+              ...(scanPhase === 'scanning' ? styles.scanBtnActive : {}),
+              ...(scanPhase === 'done' ? { background: '#00ffaa', color: '#000', opacity: 1 } : {}),
+            }}
             onClick={runScan}
-            disabled={scanning}
+            disabled={scanPhase !== 'idle'}
           >
-            {scanning ? '⟳ SCANNING…' : '▶ RUN SCAN'}
+            {scanPhase === 'scanning' ? `⟳ SCANNING... ${elapsed}s`
+              : scanPhase === 'done' ? '✓ DONE'
+              : '▶ RUN SCAN'}
           </button>
           <button style={styles.refreshBtn} onClick={onRefresh}>↻</button>
         </div>
       </div>
+
+      {scanPhase === 'scanning' && (
+        <div style={{ position: 'relative', height: '2px', overflow: 'hidden' }}>
+          <div style={{
+            position: 'absolute', top: 0, left: 0,
+            width: '25%', height: '100%',
+            background: 'linear-gradient(90deg, transparent, rgba(0,255,170,0.6), transparent)',
+            animation: 'shimmer-sweep 1.5s ease-in-out infinite',
+          }} />
+        </div>
+      )}
 
       {/* Staleness banner */}
       {isStale && (
