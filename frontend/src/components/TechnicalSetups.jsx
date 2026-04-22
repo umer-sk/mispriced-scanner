@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { fetchTechnicalSetups, triggerSetupsScan } from '../api.js'
 
 const SIGNAL_LABELS = {
@@ -106,10 +106,26 @@ function SetupCard({ setup }) {
 export default function TechnicalSetups() {
   const [setups, setSetups] = useState([])
   const [loading, setLoading] = useState(true)
-  const [scanning, setScanning] = useState(false)
+  const [scanPhase, setScanPhase] = useState('idle') // 'idle' | 'scanning' | 'done'
+  const [elapsed, setElapsed] = useState(0)
+  const pollRef = useRef(null)
+  const elapsedTimerRef = useRef(null)
+  const startPollRef = useRef(null)
+  const fallbackRef = useRef(null)
+  const idleTimerRef = useRef(null)
   const [error, setError] = useState(null)
   const [scanTimestamp, setScanTimestamp] = useState(null)
   const [filters, setFilters] = useState({ direction: 'both', minRR: 2.0, sort: 'rr' })
+
+  function clearAllTimers() {
+    clearInterval(pollRef.current)
+    clearInterval(elapsedTimerRef.current)
+    clearTimeout(startPollRef.current)
+    clearTimeout(fallbackRef.current)
+    clearTimeout(idleTimerRef.current)
+  }
+
+  useEffect(() => () => clearAllTimers(), [])
 
   useEffect(() => {
     load()
@@ -129,18 +145,44 @@ export default function TechnicalSetups() {
   }
 
   async function runScan() {
-    setScanning(true)
+    setScanPhase('scanning')
+    setElapsed(0)
+
+    let baseline = scanTimestamp ?? null
     try {
-      await triggerSetupsScan()
-      // Poll after 45s for results
-      setTimeout(async () => {
-        await load()
-        setScanning(false)
-      }, 45000)
+      const [, result] = await Promise.all([triggerSetupsScan(), fetchTechnicalSetups(filters)])
+      baseline = result.scan_timestamp ?? baseline
     } catch (e) {
       setError(e.message)
-      setScanning(false)
+      setScanPhase('idle')
+      return
     }
+
+    elapsedTimerRef.current = setInterval(() => setElapsed(e => e + 1), 1000)
+
+    // Wait 15s before polling — scan takes ~45s minimum
+    startPollRef.current = setTimeout(() => {
+      pollRef.current = setInterval(async () => {
+        try {
+          const result = await fetchTechnicalSetups(filters)
+          if (result.scan_timestamp && result.scan_timestamp !== baseline) {
+            clearAllTimers()
+            setSetups(result.setups || [])
+            setScanTimestamp(result.scan_timestamp)
+            setScanPhase('done')
+            idleTimerRef.current = setTimeout(() => setScanPhase('idle'), 2000)
+          }
+        } catch (_) {}
+      }, 5000)
+    }, 15000)
+
+    // Absolute fallback at 90s
+    fallbackRef.current = setTimeout(async () => {
+      clearAllTimers()
+      await load()
+      setScanPhase('done')
+      idleTimerRef.current = setTimeout(() => setScanPhase('idle'), 2000)
+    }, 90000)
   }
 
   const scanTime = scanTimestamp
@@ -160,18 +202,29 @@ export default function TechnicalSetups() {
             <span style={styles.scanTime}>Last scan: {scanTime}</span>
           )}
           <button
-            style={{ ...styles.scanBtn, ...(scanning ? styles.scanBtnActive : {}) }}
+            style={{
+              ...styles.scanBtn,
+              ...(scanPhase === 'scanning' ? styles.scanBtnActive : {}),
+              ...(scanPhase === 'done' ? { background: '#00ffaa', color: '#000', opacity: 1 } : {}),
+            }}
             onClick={runScan}
-            disabled={scanning}
+            disabled={scanPhase !== 'idle'}
           >
-            {scanning ? '⟳ SCANNING…' : '▶ SCAN SETUPS'}
+            {scanPhase === 'scanning' ? `⟳ SCANNING... ${elapsed}s`
+              : scanPhase === 'done' ? '✓ DONE'
+              : '▶ SCAN SETUPS'}
           </button>
         </div>
       </div>
 
-      {scanning && (
-        <div style={styles.scanningBanner}>
-          ⟳ Scanning 100 symbols — takes ~45 seconds. Results will load automatically.
+      {scanPhase === 'scanning' && (
+        <div style={{ position: 'relative', height: '2px', overflow: 'hidden' }}>
+          <div style={{
+            position: 'absolute', top: 0, left: 0,
+            width: '25%', height: '100%',
+            background: 'linear-gradient(90deg, transparent, rgba(0,255,170,0.6), transparent)',
+            animation: 'shimmer-sweep 1.5s ease-in-out infinite',
+          }} />
         </div>
       )}
 
@@ -217,7 +270,7 @@ export default function TechnicalSetups() {
       </div>
 
       {/* Results */}
-      {!loading && setups.length === 0 && !scanning && (
+      {!loading && setups.length === 0 && scanPhase === 'idle' && (
         <div style={styles.empty}>
           {scanTimestamp
             ? 'No setups meet your filters. Try lowering Min R:R or running a fresh scan.'
