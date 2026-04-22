@@ -55,22 +55,25 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
   const pollRef = useRef(null)
   const elapsedTimerRef = useRef(null)
   const fallbackRef = useRef(null)
+  const idleTimerRef = useRef(null)
 
   function clearAllTimers() {
     clearInterval(pollRef.current)
     clearInterval(elapsedTimerRef.current)
     clearTimeout(fallbackRef.current)
+    clearTimeout(idleTimerRef.current)
   }
 
   useEffect(() => () => clearAllTimers(), [])
 
   async function runScan() {
-    const baseline = data?.scan_timestamp ?? null
     setScanPhase('scanning')
     setElapsed(0)
 
+    let baseline = data?.scan_timestamp ?? null
     try {
-      await triggerScan()
+      const [, health] = await Promise.all([triggerScan(), fetchHealth()])
+      baseline = health.last_scan ?? baseline
     } catch (e) {
       setScanPhase('idle')
       return
@@ -85,7 +88,7 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
           clearAllTimers()
           setScanPhase('done')
           await onRefresh()
-          setTimeout(() => setScanPhase('idle'), 2000)
+          idleTimerRef.current = setTimeout(() => setScanPhase('idle'), 2000)
         }
       } catch (_) {}
     }, 3000)
@@ -94,7 +97,7 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
       clearAllTimers()
       setScanPhase('done')
       await onRefresh()
-      setTimeout(() => setScanPhase('idle'), 2000)
+      idleTimerRef.current = setTimeout(() => setScanPhase('idle'), 2000)
     }, 60000)
   }
 
