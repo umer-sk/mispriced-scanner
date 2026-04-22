@@ -186,15 +186,6 @@ scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=9, minute=45
 scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=11, minute=0, timezone=ET))
 scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=15, minute=45, timezone=ET))
 scheduler.add_job(refresh_sector_analysis, CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone=ET))
-scheduler.add_job(_run_technical_scan, CronTrigger(day_of_week="mon-fri", hour=9, minute=0, timezone=ET))
-scheduler.add_job(_run_technical_scan, CronTrigger(day_of_week="mon-fri", hour=12, minute=0, timezone=ET))
-
-
-async def _delayed_technical_scan() -> None:
-    """Run technical scan 60s after startup so the main scan goes first."""
-    await asyncio.sleep(60)
-    if _is_weekday():
-        await _run_technical_scan()
 
 
 @app.on_event("startup")
@@ -206,7 +197,6 @@ async def startup():
     if _is_market_open() and _is_weekday():
         asyncio.create_task(scan_all())
     asyncio.create_task(refresh_sector_analysis())
-    asyncio.create_task(_delayed_technical_scan())
 
 
 @app.on_event("shutdown")

@@ -450,6 +450,8 @@ def scan_technical_setups(
         logger.error("yfinance batch download failed: %s", e)
         return []
 
+    logger.info("Technical scan: yfinance returned shape=%s columns=%s", raw.shape, type(raw.columns).__name__)
+
     # Extract QQQ DataFrame
     if len(all_tickers) == 1:
         qqq_df = raw
@@ -475,6 +477,7 @@ def scan_technical_setups(
                 continue
 
             score, details = score_signals(symbol, df, qqq_df)
+            logger.info("Technical scan: %s score=%d details=%s", symbol, score, details)
 
             if direction == "bullish" and score < NET_SCORE_THRESHOLD:
                 continue
@@ -500,13 +503,21 @@ def scan_technical_setups(
         try:
             chain = fetch_option_chain(symbol)
             if chain.stock_price == 0:
+                logger.warning("Technical scan: %s chain returned stock_price=0 (is_stale=%s)", symbol, chain.is_stale)
                 continue
+
+            logger.info("Technical scan: %s stock=%.2f iv_rank=%.0f calls=%d puts=%d atr=%.2f dir=%s",
+                        symbol, chain.stock_price, chain.iv_rank, len(chain.calls), len(chain.puts), atr, sig_direction)
 
             setup = _pick_best_structure(
                 symbol, chain.stock_price, chain,
                 sig_direction, signal_count, details, atr,
             )
-            if setup is None or setup.rr_ratio < min_rr:
+            if setup is None:
+                logger.info("Technical scan: %s no structure met R:R >= %.1f", symbol, min_rr)
+                continue
+            if setup.rr_ratio < min_rr:
+                logger.info("Technical scan: %s structure rr=%.2f below min_rr=%.1f", symbol, setup.rr_ratio, min_rr)
                 continue
             setups.append(setup)
 
