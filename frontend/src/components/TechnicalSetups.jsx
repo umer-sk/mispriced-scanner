@@ -167,9 +167,8 @@ export default function TechnicalSetups() {
           const result = await fetchTechnicalSetups(filters)
           if (result.scan_timestamp && result.scan_timestamp !== baseline) {
             clearAllTimers()
-            setSetups(result.setups || [])
-            setScanTimestamp(result.scan_timestamp)
             setScanPhase('done')
+            await load()
             idleTimerRef.current = setTimeout(() => setScanPhase('idle'), 2000)
           }
         } catch (_) {}
