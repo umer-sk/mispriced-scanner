@@ -487,7 +487,7 @@ def scan_technical_setups(
             signal_count = sum(1 for v in details.values() if (
                 v if signal_direction == "bullish" else not v
             ))
-            qualifying.append((symbol, signal_count, details, df, signal_direction))
+            qualifying.append((symbol, signal_count, details, _atr14(df), signal_direction))
 
         except Exception as e:
             logger.warning("Signal scoring failed for %s: %s", symbol, e)
@@ -496,13 +496,12 @@ def scan_technical_setups(
 
     setups: list[TechnicalSetup] = []
 
-    for symbol, signal_count, details, df, sig_direction in qualifying:
+    for symbol, signal_count, details, atr, sig_direction in qualifying:
         try:
             chain = fetch_option_chain(symbol)
             if chain.stock_price == 0:
                 continue
 
-            atr = _atr14(df)
             setup = _pick_best_structure(
                 symbol, chain.stock_price, chain,
                 sig_direction, signal_count, details, atr,

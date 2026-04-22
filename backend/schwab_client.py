@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import os
+import shutil
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -27,19 +28,37 @@ SCHWAB_APP_SECRET = os.environ["SCHWAB_APP_SECRET"]
 SCHWAB_CALLBACK_URL = os.environ.get("SCHWAB_CALLBACK_URL", "https://127.0.0.1")
 SCHWAB_TOKEN_PATH = os.environ.get("SCHWAB_TOKEN_PATH", "./token.json")
 
+
+def _resolve_token_path() -> str:
+    """
+    Render mounts secret files at /etc/secrets/ as read-only.
+    schwab-py writes back a refreshed token after each auth call, so we need
+    a writable copy. Copy once to /tmp on startup if the configured path is
+    read-only.
+    """
+    if os.path.exists(SCHWAB_TOKEN_PATH) and not os.access(SCHWAB_TOKEN_PATH, os.W_OK):
+        writable = "/tmp/schwab_token.json"
+        shutil.copy2(SCHWAB_TOKEN_PATH, writable)
+        logger.info("Token at %s is read-only; copied to %s", SCHWAB_TOKEN_PATH, writable)
+        return writable
+    return SCHWAB_TOKEN_PATH
+
+
+_EFFECTIVE_TOKEN_PATH = _resolve_token_path()
+
 # In-process caches
 _last_chain_cache: dict[str, OptionChainData] = {}
 _iv_history: dict[tuple[str, date], float] = {}  # (symbol, date) -> iv30
 
 
 def _get_client() -> schwab.client.Client:
-    if not os.path.exists(SCHWAB_TOKEN_PATH):
+    if not os.path.exists(_EFFECTIVE_TOKEN_PATH):
         raise RuntimeError(
-            f"ERROR: token.json not found at {SCHWAB_TOKEN_PATH}. "
+            f"ERROR: token.json not found at {_EFFECTIVE_TOKEN_PATH}. "
             "Run auth_setup.py locally and upload token.json to Render Secret Files."
         )
     return schwab.auth.client_from_token_file(
-        token_path=SCHWAB_TOKEN_PATH,
+        token_path=_EFFECTIVE_TOKEN_PATH,
         api_key=SCHWAB_APP_KEY,
         app_secret=SCHWAB_APP_SECRET,
     )
