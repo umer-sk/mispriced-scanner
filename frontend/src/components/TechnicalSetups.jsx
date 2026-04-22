@@ -172,7 +172,7 @@ export default function TechnicalSetups() {
             idleTimerRef.current = setTimeout(() => setScanPhase('idle'), 2000)
           }
         } catch (_) {}
-      }, 5000)
+      }, 8000)
     }, 15000)
 
     // Absolute fallback at 90s
@@ -305,10 +305,6 @@ const styles = {
     fontFamily: 'monospace', fontSize: '11px', letterSpacing: '0.05em',
   },
   scanBtnActive: { color: '#555', borderColor: '#333', cursor: 'not-allowed' },
-  scanningBanner: {
-    background: '#0a0a14', borderLeft: '4px solid #00ffaa',
-    color: '#00ffaa', padding: '8px 16px', fontSize: '12px', fontFamily: 'monospace',
-  },
   errorBanner: {
     background: '#1a0505', borderLeft: '4px solid #ff4444',
     color: '#ff4444', padding: '8px 16px', fontSize: '12px', fontFamily: 'monospace',
