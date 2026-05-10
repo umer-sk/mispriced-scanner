@@ -1,3 +1,4 @@
+import gc
 import logging
 from typing import Optional
 
@@ -112,4 +113,6 @@ def get_technical_contexts(symbols: list[str]) -> dict[str, Optional[TechnicalCo
             logger.warning("Technical analysis failed for %s: %s", symbol, e)
             results[symbol] = None
 
+    del raw
+    gc.collect()
     return results

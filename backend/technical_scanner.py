@@ -4,6 +4,7 @@ Technical momentum scanner — Qullamaggie/Minervini style.
 Evaluates 7 signals per stock using daily price history from yfinance.
 Stocks with 5+/7 signals agreeing on direction proceed to options structure selection.
 """
+import gc
 import logging
 from datetime import date, datetime
 from typing import Optional
@@ -496,6 +497,10 @@ def scan_technical_setups(
             logger.warning("Signal scoring failed for %s: %s", symbol, e)
 
     logger.info("Technical scan: %d/%d symbols qualify for options check", len(qualifying), len(symbols))
+
+    # Release the large yfinance DataFrame before fetching option chains
+    del raw, qqq_df
+    gc.collect()
 
     setups: list[TechnicalSetup] = []
 
