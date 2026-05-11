@@ -48,6 +48,7 @@ export default function SectorPanel({ sectors }) {
           <span style={{ ...styles.cell, width: 90, textAlign: 'right' }}>vs SPY ({period})</span>
           <span style={{ ...styles.cell, width: 70, textAlign: 'right' }}>RS Score</span>
           <span style={{ ...styles.cell, width: 60, textAlign: 'center' }}>Trend</span>
+          <span style={{ ...styles.cell, width: 70, textAlign: 'center' }}>Rotation</span>
         </div>
         {sorted.map(s => {
           const ret = getReturn(s)
@@ -66,6 +67,9 @@ export default function SectorPanel({ sectors }) {
                 color: s.trend_direction === 'improving' ? '#00ffaa' : s.trend_direction === 'deteriorating' ? '#ff4444' : '#555',
               }}>
                 {arrow(s.trend_direction)}
+              </span>
+              <span style={{ ...styles.cell, width: 70, textAlign: 'center' }}>
+                {s.rotation ?? '→'}
               </span>
             </div>
           )
