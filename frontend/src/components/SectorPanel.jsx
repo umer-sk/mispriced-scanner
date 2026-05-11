@@ -12,6 +12,12 @@ function retColor(val) {
   return val >= 0 ? '#00ffaa' : '#ff4444'
 }
 
+function rotationColor(r) {
+  if (r === '↑↑' || r === '↑') return '#00ffaa'
+  if (r === '↓↓' || r === '↓') return '#ff4444'
+  return '#555'
+}
+
 export default function SectorPanel({ sectors }) {
   const [period, setPeriod] = useState('4W')
 
@@ -68,7 +74,7 @@ export default function SectorPanel({ sectors }) {
               }}>
                 {arrow(s.trend_direction)}
               </span>
-              <span style={{ ...styles.cell, width: 70, textAlign: 'center' }}>
+              <span style={{ ...styles.cell, width: 70, textAlign: 'center', color: rotationColor(s.rotation ?? '→') }}>
                 {s.rotation ?? '→'}
               </span>
             </div>
