@@ -143,13 +143,15 @@ def _get_sector_flow(etfs: list[str]) -> dict[str, int]:
 
 
 def get_sector_analysis() -> list[SectorData]:
-    """Fetch 3-month daily history for all 11 sector ETFs + SPY."""
+    """Fetch 3-month daily history for all 11 sector ETFs + SPY, compute rotation signals."""
     tickers = list(SECTOR_ETFS.keys()) + ["SPY"]
     try:
-        df = yf.download(tickers, period="3mo", interval="1d", progress=False, auto_adjust=True)["Close"]
-        if df.empty:
+        raw = yf.download(tickers, period="3mo", interval="1d", progress=False, auto_adjust=True)
+        if raw.empty:
             logger.warning("Sector analysis: empty data from yfinance")
             return []
+        df = raw["Close"]
+        vol_df = raw["Volume"]
     except Exception as e:
         logger.error("Sector analysis fetch failed: %s", e)
         return []
@@ -159,12 +161,15 @@ def get_sector_analysis() -> list[SectorData]:
         return []
 
     spy_ret = {
-        "1w": _compute_return([_safe(spy, -5), spy[-1]], 0, 1),
-        "4w": _compute_return([_safe(spy, -20), spy[-1]], 0, 1),
+        "1w":  _compute_return([_safe(spy, -5),  spy[-1]], 0, 1),
+        "4w":  _compute_return([_safe(spy, -20), spy[-1]], 0, 1),
         "12w": _compute_return([_safe(spy, -60), spy[-1]], 0, 1),
     }
+    prior_spy = _compute_return([_safe(spy, -60), _safe(spy, -20)], 0, 1)
+    spy_4w_5d_ago = _compute_return([_safe(spy, -25), _safe(spy, -5)], 0, 1)
 
     vs_spy_4w: dict[str, float] = {}
+    vs_spy_4w_5d_ago: dict[str, float] = {}
     sector_raw: dict[str, dict] = {}
 
     for etf in SECTOR_ETFS:
@@ -174,47 +179,63 @@ def get_sector_analysis() -> list[SectorData]:
         if len(prices) < 5:
             continue
 
-        abs_r1w  = _compute_return([_safe(prices, -5),  prices[-1]], 0, 1)
-        abs_r4w  = _compute_return([_safe(prices, -20), prices[-1]], 0, 1)
-        abs_r12w = _compute_return([_safe(prices, -60), prices[-1]], 0, 1)
+        abs_r1w   = _compute_return([_safe(prices, -5),  prices[-1]], 0, 1)
+        abs_r4w   = _compute_return([_safe(prices, -20), prices[-1]], 0, 1)
+        abs_r12w  = _compute_return([_safe(prices, -60), prices[-1]], 0, 1)
         prior_r4w = _compute_return([_safe(prices, -60), _safe(prices, -20)], 0, 1)
-        spy_prior = _compute_return([_safe(spy, -60), _safe(spy, -20)], 0, 1)
+        r4w_5d_ago = _compute_return([_safe(prices, -25), _safe(prices, -5)], 0, 1)
 
         vs_spy_4w[etf] = round(abs_r4w - spy_ret["4w"], 2)
+        vs_spy_4w_5d_ago[etf] = round(r4w_5d_ago - spy_4w_5d_ago, 2)
+
+        volumes = vol_df[etf].dropna().tolist() if etf in vol_df.columns else []
+
         sector_raw[etf] = {
-            "return_1w":          abs_r1w,
-            "return_4w":          abs_r4w,
-            "return_12w":         abs_r12w,
-            "return_vs_spy_1w":   round(abs_r1w  - spy_ret["1w"],  2),
-            "return_vs_spy_4w":   round(abs_r4w  - spy_ret["4w"],  2),
-            "return_vs_spy_12w":  round(abs_r12w - spy_ret["12w"], 2),
-            "prior_vs_spy_4w":    round(prior_r4w - spy_prior, 2),
+            "return_1w":         abs_r1w,
+            "return_4w":         abs_r4w,
+            "return_12w":        abs_r12w,
+            "return_vs_spy_1w":  round(abs_r1w  - spy_ret["1w"],  2),
+            "return_vs_spy_4w":  round(abs_r4w  - spy_ret["4w"],  2),
+            "return_vs_spy_12w": round(abs_r12w - spy_ret["12w"], 2),
+            "prior_vs_spy_4w":   round(prior_r4w - prior_spy, 2),
+            "volumes":           volumes,
+            "prices":            prices,
         }
 
     scores = _rs_score(vs_spy_4w)
-
+    scores_5d_ago = _rs_score(vs_spy_4w_5d_ago)
     prior_vs_spy = {etf: sector_raw[etf]["prior_vs_spy_4w"] for etf in sector_raw}
     prior_scores = _rs_score(prior_vs_spy)
+
+    flow_votes = _get_sector_flow(list(SECTOR_ETFS.keys()))
 
     results = []
     for etf, name in SECTOR_ETFS.items():
         if etf not in sector_raw:
             continue
-        raw = sector_raw[etf]
+        d = sector_raw[etf]
         score = scores.get(etf, 50.0)
         prior = prior_scores.get(etf, 50.0)
+        score_5d_ago = scores_5d_ago.get(etf, 50.0)
+
+        rs_vote  = _rs_momentum_vote(score, score_5d_ago)
+        vol_vote = _volume_vote(d["volumes"], d["prices"])
+        flow_vote = flow_votes.get(etf, 0)
+        rotation = _score_to_arrow(rs_vote + vol_vote + flow_vote)
+
         results.append(SectorData(
             etf=etf,
             name=name,
-            return_1w=raw["return_1w"],
-            return_4w=raw["return_4w"],
-            return_12w=raw["return_12w"],
-            return_vs_spy_1w=raw["return_vs_spy_1w"],
-            return_vs_spy_4w=raw["return_vs_spy_4w"],
-            return_vs_spy_12w=raw["return_vs_spy_12w"],
+            return_1w=d["return_1w"],
+            return_4w=d["return_4w"],
+            return_12w=d["return_12w"],
+            return_vs_spy_1w=d["return_vs_spy_1w"],
+            return_vs_spy_4w=d["return_vs_spy_4w"],
+            return_vs_spy_12w=d["return_vs_spy_12w"],
             rs_score=score,
             trend_direction=_trend_direction(score, prior),
             classification=_classify(score),
+            rotation=rotation,
         ))
 
     results.sort(key=lambda s: s.rs_score, reverse=True)
