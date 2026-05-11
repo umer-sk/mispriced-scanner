@@ -157,6 +157,7 @@ class SectorData:
     rs_score: float             # 0–100 relative to other sectors
     trend_direction: str        # "improving" | "deteriorating" | "stable"
     classification: str         # "bullish" | "bearish" | "neutral"
+    rotation: str = "→"        # ↑↑ / ↑ / → / ↓ / ↓↓ (3-signal agreement)
 
 
 @dataclass
