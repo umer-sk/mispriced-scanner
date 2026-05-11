@@ -4,6 +4,11 @@ from zoneinfo import ZoneInfo
 
 import yfinance as yf
 
+try:
+    from schwab_client import fetch_option_chain
+except Exception:
+    fetch_option_chain = None
+
 from models import SectorData
 
 logger = logging.getLogger(__name__)
@@ -64,6 +69,77 @@ def _trend_direction(current: float, prior: float) -> str:
 
 def _safe(lst: list, i: int) -> float:
     return lst[max(i, -len(lst))]
+
+
+def _score_to_arrow(total: int) -> str:
+    if total >= 2:
+        return "↑↑"
+    if total == 1:
+        return "↑"
+    if total == -1:
+        return "↓"
+    if total <= -2:
+        return "↓↓"
+    return "→"
+
+
+def _rs_momentum_vote(current_score: float, prior_score: float) -> int:
+    """+1 if RS score accelerating by >5pts, -1 if decelerating, 0 if stable."""
+    delta = current_score - prior_score
+    if delta > 5:
+        return 1
+    if delta < -5:
+        return -1
+    return 0
+
+
+def _volume_vote(volumes: list[float], prices: list[float]) -> int:
+    """+1 for accumulation (high vol + rising price), -1 for distribution, 0 neutral."""
+    if len(volumes) < 20 or len(prices) < 6:
+        return 0
+    vol_5d = sum(volumes[-5:]) / 5
+    vol_20d = sum(volumes[-20:]) / 20
+    if vol_20d == 0:
+        return 0
+    ratio = vol_5d / vol_20d
+    if ratio < 1.3:
+        return 0
+    price_return = (prices[-1] - prices[-6]) / prices[-6] if prices[-6] != 0 else 0
+    if price_return > 0:
+        return 1
+    if price_return < 0:
+        return -1
+    return 0
+
+
+def _get_sector_flow(etfs: list[str]) -> dict[str, int]:
+    """Fetch Schwab option chains for sector ETFs. Returns put/call vote per ETF.
+    Returns empty dict if Schwab client unavailable."""
+    if fetch_option_chain is None:
+        return {}
+    votes: dict[str, int] = {}
+    for etf in etfs:
+        try:
+            chain = fetch_option_chain(etf)
+            if chain.stock_price == 0:
+                votes[etf] = 0
+                continue
+            call_oi = sum(c.open_interest for c in chain.calls if 30 <= c.dte <= 60)
+            put_oi = sum(c.open_interest for c in chain.puts if 30 <= c.dte <= 60)
+            if call_oi == 0:
+                votes[etf] = 0
+                continue
+            pc_ratio = put_oi / call_oi
+            if pc_ratio < 0.8:
+                votes[etf] = 1    # call-biased → bullish
+            elif pc_ratio > 1.2:
+                votes[etf] = -1   # put-biased → bearish
+            else:
+                votes[etf] = 0
+        except Exception as e:
+            logger.warning("Sector flow fetch failed for %s: %s", etf, e)
+            votes[etf] = 0
+    return votes
 
 
 def get_sector_analysis() -> list[SectorData]:
