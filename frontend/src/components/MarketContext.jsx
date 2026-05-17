@@ -1,3 +1,17 @@
+function maChip(label, price, ma) {
+  if (!price || !ma) return null
+  const above = price > ma
+  return (
+    <span style={{
+      fontFamily: 'monospace', fontSize: '11px',
+      color: above ? '#00ffaa' : '#ff4444',
+      marginRight: '10px',
+    }}>
+      {above ? '▲' : '▼'} {label}
+    </span>
+  )
+}
+
 export default function MarketContext({ marketContext }) {
   if (!marketContext) {
     return (
@@ -8,7 +22,12 @@ export default function MarketContext({ marketContext }) {
     )
   }
 
-  const { skip_today, skip_reason, market_regime, vix_level, vix_trend, scan_timestamp, market_is_open } = marketContext
+  const {
+    skip_today, skip_reason, market_regime, vix_level, vix_trend,
+    scan_timestamp, market_is_open,
+    spy_price, spy_ema7, spy_ma20, spy_ma50,
+    qqq_price, qqq_ema7, qqq_ma20, qqq_ma50,
+  } = marketContext
 
   let bg = '#0a1a0f'
   let border = '#00ffaa'
@@ -53,6 +72,22 @@ export default function MarketContext({ marketContext }) {
         <div style={{ textAlign: 'right', fontSize: '11px', color: '#555', whiteSpace: 'nowrap' }}>
           <div>QQQ IV: {vix_level ? `${vix_level.toFixed(1)}%` : '—'} {vix_trend ? `(${vix_trend.toLowerCase()})` : ''}</div>
           <div>Scan: {scanTime} ET</div>
+          {(spy_price > 0 || qqq_price > 0) && (
+            <div style={{ marginTop: '6px', borderTop: '1px solid #1a1a2e', paddingTop: '6px' }}>
+              <div style={{ marginBottom: '3px' }}>
+                <span style={{ fontFamily: 'monospace', fontSize: '10px', color: '#555', marginRight: '8px' }}>SPY</span>
+                {maChip('EMA7', spy_price, spy_ema7)}
+                {maChip('MA20', spy_price, spy_ma20)}
+                {maChip('MA50', spy_price, spy_ma50)}
+              </div>
+              <div>
+                <span style={{ fontFamily: 'monospace', fontSize: '10px', color: '#555', marginRight: '8px' }}>QQQ</span>
+                {maChip('EMA7', qqq_price, qqq_ema7)}
+                {maChip('MA20', qqq_price, qqq_ma20)}
+                {maChip('MA50', qqq_price, qqq_ma50)}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

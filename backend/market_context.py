@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, date
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import yfinance as yf
+
 from models import MarketContext, OptionChainData
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,26 @@ def _token_age_days() -> float:
     return (datetime.utcnow().timestamp() - mtime) / 86400
 
 
+def _fetch_index_mas() -> dict:
+    """Fetch SPY and QQQ price + 7EMA / 20MA / 50MA via yfinance. Returns empty dict on failure."""
+    try:
+        raw = yf.download(["SPY", "QQQ"], period="3mo", interval="1d", auto_adjust=True, progress=False)
+        result = {}
+        for sym in ("SPY", "QQQ"):
+            closes = raw["Close"][sym].dropna()
+            if len(closes) < 20:
+                continue
+            price = float(closes.iloc[-1])
+            ema7 = float(closes.ewm(span=7, adjust=False).mean().iloc[-1])
+            ma20 = float(closes.rolling(20).mean().iloc[-1])
+            ma50 = float(closes.rolling(50).mean().iloc[-1]) if len(closes) >= 50 else 0.0
+            result[sym] = {"price": round(price, 2), "ema7": round(ema7, 2), "ma20": round(ma20, 2), "ma50": round(ma50, 2)}
+        return result
+    except Exception as e:
+        logger.warning("SPY/QQQ MA fetch failed: %s", e)
+        return {}
+
+
 def get_market_context(qqq_chain: Optional[OptionChainData] = None) -> MarketContext:
     """
     Assess overall market conditions and generate skip recommendation.
@@ -80,6 +102,9 @@ def get_market_context(qqq_chain: Optional[OptionChainData] = None) -> MarketCon
     now_utc = datetime.utcnow()
     market_open = _is_market_open()
     next_scan = _next_scan_time()
+    mas = _fetch_index_mas()
+    spy = mas.get("SPY", {})
+    qqq = mas.get("QQQ", {})
 
     if qqq_chain is None or qqq_chain.iv30 == 0:
         return MarketContext(
@@ -91,6 +116,14 @@ def get_market_context(qqq_chain: Optional[OptionChainData] = None) -> MarketCon
             scan_timestamp=now_utc,
             market_is_open=market_open,
             next_scan_time=next_scan,
+            spy_price=spy.get("price", 0.0),
+            spy_ema7=spy.get("ema7", 0.0),
+            spy_ma20=spy.get("ma20", 0.0),
+            spy_ma50=spy.get("ma50", 0.0),
+            qqq_price=qqq.get("price", 0.0),
+            qqq_ema7=qqq.get("ema7", 0.0),
+            qqq_ma20=qqq.get("ma20", 0.0),
+            qqq_ma50=qqq.get("ma50", 0.0),
         )
 
     qqq_iv = qqq_chain.iv30
@@ -168,4 +201,12 @@ def get_market_context(qqq_chain: Optional[OptionChainData] = None) -> MarketCon
         scan_timestamp=now_utc,
         market_is_open=market_open,
         next_scan_time=next_scan,
+        spy_price=spy.get("price", 0.0),
+        spy_ema7=spy.get("ema7", 0.0),
+        spy_ma20=spy.get("ma20", 0.0),
+        spy_ma50=spy.get("ma50", 0.0),
+        qqq_price=qqq.get("price", 0.0),
+        qqq_ema7=qqq.get("ema7", 0.0),
+        qqq_ma20=qqq.get("ma20", 0.0),
+        qqq_ma50=qqq.get("ma50", 0.0),
     )

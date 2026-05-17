@@ -142,6 +142,15 @@ class MarketContext:
     scan_timestamp: datetime
     market_is_open: bool
     next_scan_time: Optional[str]
+    # SPY/QQQ moving average levels (0.0 = unavailable)
+    spy_price: float = 0.0
+    spy_ema7: float = 0.0
+    spy_ma20: float = 0.0
+    spy_ma50: float = 0.0
+    qqq_price: float = 0.0
+    qqq_ema7: float = 0.0
+    qqq_ma20: float = 0.0
+    qqq_ma50: float = 0.0
 
 
 @dataclass
