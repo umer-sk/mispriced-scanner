@@ -78,16 +78,7 @@ export default function FilterBar({ filters, onChange }) {
         />
         <span style={styles.sliderVal}>{filters.minRR.toFixed(1)}:1</span>
 
-        <span style={{ ...styles.label, marginLeft: '16px' }}>MAX DEBIT</span>
-        <input
-          type="range" min="1" max="15" step="0.5"
-          value={filters.maxDebit}
-          onChange={e => set('maxDebit', parseFloat(e.target.value))}
-          style={styles.slider}
-        />
-        <span style={styles.sliderVal}>${filters.maxDebit.toFixed(0)}</span>
-
-        <span style={{ ...styles.label, marginLeft: '16px' }}>MIN SCORE</span>
+<span style={{ ...styles.label, marginLeft: '16px' }}>MIN SCORE</span>
         <input
           type="range" min="0" max="100" step="5"
           value={filters.minScore}

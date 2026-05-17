@@ -4,7 +4,6 @@ const BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
 export async function fetchOpportunities(filters = {}) {
   const params = new URLSearchParams({
     min_rr:    filters.minRR      ?? 2.0,
-    max_debit: filters.maxDebit   ?? 8.0,
     min_score: filters.minScore   ?? 55,
     detector:  filters.detector   ?? 'all',
     direction: filters.direction  ?? 'both',
