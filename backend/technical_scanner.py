@@ -21,8 +21,8 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-# net_score = count(True) - count(False); score of 3 means 5 agree, 2 disagree (5+/7)
-NET_SCORE_THRESHOLD = 3
+# net_score = count(True) - count(False); score of 1 means 4 agree, 3 disagree (4+/7)
+NET_SCORE_THRESHOLD = 1
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +74,8 @@ def score_signals(
     Returns (net_score, signal_details) where:
     - Each signal True = bullish for that indicator, False = bearish
     - net_score = count(True) - count(False), range -7 to +7
-    - net_score >= 3 → clear bullish (5+/7 agree)
-    - net_score <= -3 → clear bearish (5+/7 agree)
+    - net_score >= 1 → bullish (4+/7 agree)
+    - net_score <= -1 → bearish (4+/7 agree)
 
     Requires df with at least 220 rows of OHLCV daily data.
     """
@@ -423,6 +423,21 @@ def _pick_best_structure(
         return spread_fn(*args) or long_fn(*args)
 
 
+_BATCH_SIZE = 15  # symbols per yfinance download — keeps peak DataFrame ~15× smaller
+
+
+def _download_qqq() -> pd.DataFrame:
+    """Download QQQ price history, returning a single-symbol DataFrame."""
+    try:
+        raw = yf.download("QQQ", period="1y", interval="1d", auto_adjust=True, progress=False)
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw = raw.xs("QQQ", axis=1, level=1)
+        return raw.dropna()
+    except Exception as e:
+        logger.error("yfinance QQQ download failed: %s", e)
+        return pd.DataFrame()
+
+
 def scan_technical_setups(
     symbols: list[str],
     min_rr: float = 2.0,
@@ -430,77 +445,77 @@ def scan_technical_setups(
 ) -> list[TechnicalSetup]:
     """
     Full technical scan:
-    1. Fetch 220-day daily OHLCV from yfinance for all symbols + QQQ
-    2. Score 7 signals per stock
-    3. For stocks with score >= NET_SCORE_THRESHOLD (5+/7 agree):
-       fetch Schwab option chain, pick best structure
+    1. Fetch QQQ price history once, then score symbols in batches of _BATCH_SIZE
+    2. Score 7 signals per stock; qualifying = abs(net_score) >= NET_SCORE_THRESHOLD
+    3. For qualifying stocks: fetch Schwab option chain, pick best structure
     4. Filter by min_rr, sort by rr_ratio descending
-    """
-    logger.info("Technical scan: fetching price history for %d symbols", len(symbols))
 
-    all_tickers = symbols + (["QQQ"] if "QQQ" not in symbols else [])
-    try:
-        raw = yf.download(
-            tickers=all_tickers,
-            period="1y",
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-        )
-    except Exception as e:
-        logger.error("yfinance batch download failed: %s", e)
+    Batching yfinance downloads keeps peak RAM ~3× lower than fetching all at once.
+    """
+    logger.info("Technical scan: fetching QQQ + %d symbols in batches of %d", len(symbols), _BATCH_SIZE)
+
+    qqq_df = _download_qqq()
+    if qqq_df.empty:
+        logger.error("Technical scan: QQQ download failed, aborting")
         return []
 
-    logger.info("Technical scan: yfinance returned shape=%s columns=%s", raw.shape, type(raw.columns).__name__)
-
-    # Extract QQQ DataFrame
-    if len(all_tickers) == 1:
-        qqq_df = raw
-    elif isinstance(raw.columns, pd.MultiIndex):
-        try:
-            qqq_df = raw.xs("QQQ", axis=1, level=1) if "QQQ" in all_tickers else raw
-        except Exception:
-            qqq_df = raw
-    else:
-        qqq_df = raw
-
     qualifying = []
+    batches = [symbols[i:i + _BATCH_SIZE] for i in range(0, len(symbols), _BATCH_SIZE)]
 
-    for symbol in symbols:
+    for batch_idx, batch in enumerate(batches):
         try:
-            if len(all_tickers) > 1 and isinstance(raw.columns, pd.MultiIndex):
-                df = raw.xs(symbol, axis=1, level=1).dropna()
-            else:
-                df = raw.dropna()
-
-            if len(df) < 50:
-                logger.debug("%s: insufficient price history (%d rows)", symbol, len(df))
-                continue
-
-            score, details = score_signals(symbol, df, qqq_df)
-            logger.info("Technical scan: %s score=%d details=%s", symbol, score, details)
-
-            if direction == "bullish" and score < NET_SCORE_THRESHOLD:
-                continue
-            if direction == "bearish" and score > -NET_SCORE_THRESHOLD:
-                continue
-            if direction == "both" and abs(score) < NET_SCORE_THRESHOLD:
-                continue
-
-            signal_direction = "bullish" if score >= NET_SCORE_THRESHOLD else "bearish"
-            signal_count = sum(1 for v in details.values() if (
-                v if signal_direction == "bullish" else not v
-            ))
-            qualifying.append((symbol, signal_count, details, _atr14(df), signal_direction))
-
+            raw = yf.download(
+                tickers=batch,
+                period="1y",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+            )
         except Exception as e:
-            logger.warning("Signal scoring failed for %s: %s", symbol, e)
+            logger.warning("Technical scan: batch %d yfinance download failed: %s", batch_idx, e)
+            continue
+
+        logger.info("Technical scan: batch %d/%d shape=%s", batch_idx + 1, len(batches), raw.shape)
+
+        for symbol in batch:
+            try:
+                if len(batch) == 1:
+                    df = raw.dropna()
+                elif isinstance(raw.columns, pd.MultiIndex):
+                    df = raw.xs(symbol, axis=1, level=1).dropna()
+                else:
+                    df = raw.dropna()
+
+                if len(df) < 50:
+                    logger.debug("%s: insufficient price history (%d rows)", symbol, len(df))
+                    continue
+
+                score, details = score_signals(symbol, df, qqq_df)
+                logger.info("Technical scan: %s score=%d details=%s", symbol, score, details)
+
+                if direction == "bullish" and score < NET_SCORE_THRESHOLD:
+                    continue
+                if direction == "bearish" and score > -NET_SCORE_THRESHOLD:
+                    continue
+                if direction == "both" and abs(score) < NET_SCORE_THRESHOLD:
+                    continue
+
+                signal_direction = "bullish" if score >= NET_SCORE_THRESHOLD else "bearish"
+                signal_count = sum(1 for v in details.values() if (
+                    v if signal_direction == "bullish" else not v
+                ))
+                qualifying.append((symbol, signal_count, details, _atr14(df), signal_direction))
+
+            except Exception as e:
+                logger.warning("Signal scoring failed for %s: %s", symbol, e)
+
+        del raw
+        gc.collect()
+
+    del qqq_df
+    gc.collect()
 
     logger.info("Technical scan: %d/%d symbols qualify for options check", len(qualifying), len(symbols))
-
-    # Release the large yfinance DataFrame before fetching option chains
-    del raw, qqq_df
-    gc.collect()
 
     setups: list[TechnicalSetup] = []
 
