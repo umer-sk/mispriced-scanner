@@ -74,8 +74,17 @@ def _token_age_days() -> float:
     return (datetime.utcnow().timestamp() - mtime) / 86400
 
 
+_mas_cache: dict = {}
+_mas_cache_time: Optional[datetime] = None
+_MAS_TTL_SECONDS = 3600  # refresh at most once per hour
+
+
 def _fetch_index_mas() -> dict:
-    """Fetch SPY and QQQ price + 7EMA / 20MA / 50MA via yfinance. Returns empty dict on failure."""
+    """Fetch SPY and QQQ price + 7EMA / 20MA / 50MA via yfinance. Cached for 1 hour."""
+    global _mas_cache, _mas_cache_time
+    now = datetime.utcnow()
+    if _mas_cache_time and (now - _mas_cache_time).total_seconds() < _MAS_TTL_SECONDS:
+        return _mas_cache
     try:
         raw = yf.download(["SPY", "QQQ"], period="3mo", interval="1d", auto_adjust=True, progress=False)
         result = {}
@@ -88,10 +97,12 @@ def _fetch_index_mas() -> dict:
             ma20 = float(closes.rolling(20).mean().iloc[-1])
             ma50 = float(closes.rolling(50).mean().iloc[-1]) if len(closes) >= 50 else 0.0
             result[sym] = {"price": round(price, 2), "ema7": round(ema7, 2), "ma20": round(ma20, 2), "ma50": round(ma50, 2)}
+        _mas_cache = result
+        _mas_cache_time = now
         return result
     except Exception as e:
         logger.warning("SPY/QQQ MA fetch failed: %s", e)
-        return {}
+        return _mas_cache  # return stale data rather than empty dict
 
 
 def get_market_context(qqq_chain: Optional[OptionChainData] = None) -> MarketContext:

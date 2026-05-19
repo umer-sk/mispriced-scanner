@@ -273,11 +273,11 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
 async def fetch_all_chains(tickers: list[str]) -> list[OptionChainData]:
     """
     Fetch all tickers efficiently.
-    Splits into 3 batches of 10, with 2s sleep between batches.
-    Total: ~15–20 seconds. Well under 120 req/min rate limit.
+    Splits into batches of 5, with 2s sleep between batches.
+    Keeps concurrent Schwab responses in memory low on constrained hosts.
     """
     results: list[OptionChainData] = []
-    batch_size = 10
+    batch_size = 5
     batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
 
     for i, batch in enumerate(batches):
