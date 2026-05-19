@@ -194,10 +194,6 @@ scheduler.add_job(refresh_sector_analysis, CronTrigger(day_of_week="mon-fri", ho
 async def startup():
     scheduler.start()
     logger.info("Scheduler started")
-    # Trigger an immediate scan on startup if market is open
-    from market_context import _is_market_open
-    if _is_market_open() and _is_weekday():
-        asyncio.create_task(scan_all())
     asyncio.create_task(refresh_sector_analysis())
 
 
@@ -224,6 +220,8 @@ def _serialize(obj):
 
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return {k: _serialize(v) for k, v in dataclasses.asdict(obj).items()}
+    if isinstance(obj, dict):
+        return {k: _serialize(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_serialize(i) for i in obj]
     if isinstance(obj, datetime):
