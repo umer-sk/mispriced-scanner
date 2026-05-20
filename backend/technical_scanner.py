@@ -463,6 +463,8 @@ def scan_technical_setups(
     batches = [symbols[i:i + _BATCH_SIZE] for i in range(0, len(symbols), _BATCH_SIZE)]
 
     for batch_idx, batch in enumerate(batches):
+        if batch_idx > 0:
+            import time; time.sleep(1)
         try:
             raw = yf.download(
                 tickers=batch,

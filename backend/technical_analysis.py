@@ -72,6 +72,8 @@ def get_technical_contexts(symbols: list[str]) -> dict[str, Optional[TechnicalCo
     batches = [symbols[i:i + _BATCH_SIZE] for i in range(0, len(symbols), _BATCH_SIZE)]
 
     for batch_idx, batch in enumerate(batches):
+        if batch_idx > 0:
+            import time; time.sleep(1)
         try:
             raw = yf.download(batch, period="1y", interval="1d", auto_adjust=True, progress=False)
         except Exception as e:

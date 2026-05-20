@@ -91,7 +91,7 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
           idleTimerRef.current = setTimeout(() => setScanPhase('idle'), 2000)
         }
       } catch (_) {}
-    }, 3000)
+    }, 6000)
 
     fallbackRef.current = setTimeout(async () => {
       clearAllTimers()

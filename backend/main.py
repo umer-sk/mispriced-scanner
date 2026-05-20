@@ -236,7 +236,7 @@ def _serialize(obj):
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
-@limiter.limit("10/minute")
+@limiter.limit("30/minute")
 async def health(request: Request):
     ts = _cache.get("scan_timestamp")
     from market_context import _is_market_open
