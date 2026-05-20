@@ -48,7 +48,6 @@ _EFFECTIVE_TOKEN_PATH = _resolve_token_path()
 
 # In-process caches
 _last_chain_cache: dict[str, OptionChainData] = {}
-_iv_history: dict[tuple[str, date], float] = {}  # (symbol, date) -> iv30
 
 
 def _get_client() -> schwab.client.Client:
@@ -141,35 +140,49 @@ def _compute_hv30(prices: list[float]) -> float:
     return math.sqrt(variance) * math.sqrt(252)
 
 
-def _compute_iv_rank(symbol: str, current_iv: float) -> tuple[float, float]:
+def _compute_iv_rank(iv30: float, closes: list[float]) -> tuple[float, float]:
     """
-    Compute IV rank and IV percentile from 52-week rolling history.
-    Returns (iv_rank, iv_percentile) both 0–100.
+    Compute IV rank and IV percentile stateless — no in-memory history needed.
+
+    Compares current IV30 against the distribution of 30-day realized HV values
+    computed from the past year of daily closes. Works correctly on fresh restarts.
+
+    iv30 may arrive as a decimal (0.29) or as a whole-number percent (29.0).
+    Both are normalised to decimal before comparison with the HV series.
     """
-    today = date.today()
-    one_year_ago = today - timedelta(days=365)
+    if len(closes) < 32:
+        return 50.0, 50.0
 
-    # Store today's observation
-    _iv_history[(symbol, today)] = current_iv
+    # Normalize IV30 to decimal (Schwab sometimes returns whole-number %)
+    iv_dec = iv30 / 100.0 if iv30 > 1.0 else iv30
 
-    # Collect historical values within the past year
-    historical = [
-        v for (sym, d), v in _iv_history.items()
-        if sym == symbol and d >= one_year_ago
+    log_returns = [
+        math.log(closes[i] / closes[i - 1])
+        for i in range(1, len(closes))
+        if closes[i - 1] > 0 and closes[i] > 0
     ]
-
-    if len(historical) < 2:
-        # Not enough history — best-effort approximation
+    if len(log_returns) < 30:
         return 50.0, 50.0
 
-    iv_min = min(historical)
-    iv_max = max(historical)
-    if iv_max == iv_min:
+    hv_series: list[float] = []
+    for i in range(30, len(log_returns) + 1):
+        window = log_returns[i - 30:i]
+        n = len(window)
+        mean = sum(window) / n
+        variance = sum((r - mean) ** 2 for r in window) / (n - 1) if n > 1 else 0.0
+        hv_series.append(math.sqrt(variance) * math.sqrt(252))
+
+    if not hv_series:
         return 50.0, 50.0
 
-    iv_rank = (current_iv - iv_min) / (iv_max - iv_min) * 100
-    iv_percentile = sum(1 for v in historical if v < current_iv) / len(historical) * 100
-    return round(iv_rank, 1), round(iv_percentile, 1)
+    hv_min, hv_max = min(hv_series), max(hv_series)
+    if hv_max == hv_min:
+        return 50.0, 50.0
+
+    iv_rank = (iv_dec - hv_min) / (hv_max - hv_min) * 100
+    iv_rank = round(max(0.0, min(100.0, iv_rank)), 1)
+    iv_percentile = round(sum(1 for v in hv_series if v < iv_dec) / len(hv_series) * 100, 1)
+    return iv_rank, iv_percentile
 
 
 def fetch_option_chain(symbol: str) -> OptionChainData:
@@ -214,11 +227,11 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
                                 atm_calls.append(iv)
             iv30_raw = sum(atm_calls) / len(atm_calls) if atm_calls else 0.0
 
-        # Fetch HV30 from price history
+        # Fetch 1 year of daily closes for HV30 + IV rank
         hist_resp = client.get_price_history(
             symbol,
-            period_type=schwab.client.Client.PriceHistory.PeriodType.MONTH,
-            period=schwab.client.Client.PriceHistory.Period.ONE_MONTH,
+            period_type=schwab.client.Client.PriceHistory.PeriodType.YEAR,
+            period=schwab.client.Client.PriceHistory.Period.ONE_YEAR,
             frequency_type=schwab.client.Client.PriceHistory.FrequencyType.DAILY,
             frequency=schwab.client.Client.PriceHistory.Frequency.DAILY,
         )
@@ -226,9 +239,8 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
         hist_data = hist_resp.json()
         candles = hist_data.get("candles", [])
         closes = [c["close"] for c in candles if "close" in c]
-        hv30 = _compute_hv30(closes[-31:])  # use last 30 returns
-
-        iv_rank, iv_percentile = _compute_iv_rank(symbol, iv30_raw)
+        hv30 = _compute_hv30(closes[-31:])
+        iv_rank, iv_percentile = _compute_iv_rank(iv30_raw, closes)
 
         calls = _parse_contracts(data.get("callExpDateMap", {}), stock_price)
         puts = _parse_contracts(data.get("putExpDateMap", {}), stock_price)
@@ -246,7 +258,8 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
             is_stale=False,
         )
         _last_chain_cache[symbol] = chain
-        logger.info(f"Fetched chain for {symbol}: stock=${stock_price:.2f} IV30={iv30_raw:.1%} HV30={hv30:.1%} IVR={iv_rank:.0f}")
+        iv30_pct = iv30_raw if iv30_raw <= 1.0 else iv30_raw / 100.0
+        logger.info(f"Fetched chain for {symbol}: stock=${stock_price:.2f} IV30={iv30_pct:.1%} HV30={hv30:.1%} IVR={iv_rank:.0f}")
         return chain
 
     except Exception as e:
