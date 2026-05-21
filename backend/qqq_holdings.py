@@ -17,9 +17,9 @@ QQQ_TOP50 = [
     "PAYX", "FAST",  "ROST", "PCAR", "EA",
     "CTSH", "BIIB",  "IDXX", "MRNA", "CPRT",
     "CTAS", "CEG",   "ON",   "NXPI", "MCHP",
-    "GEHC", "ILMN",  "LULU", "ORLY", "ANSS",
+    "GEHC", "ILMN",  "LULU", "ORLY",
     "CSX",  "WBD",   "HON",  "MAR",  "ROP",
-    "FSLR", "TTD",   "PSTG", "ARM",  "DKNG",
+    "FSLR", "TTD",   "ARM",  "DKNG",
     "GFS",  "RBLX",  "LYFT", "MSTR", "ACGL",
 ]
 
@@ -35,8 +35,8 @@ SECTOR_MAP: dict[str, str] = {
     "KLAC": "XLK", "CDNS": "XLK", "SNPS": "XLK", "PLTR": "XLK", "CRWD": "XLK",
     "PANW": "XLK", "FTNT": "XLK", "ZS":   "XLK", "NET":  "XLK", "DDOG": "XLK",
     "WDAY": "XLK", "TEAM": "XLK", "ON":   "XLK", "NXPI": "XLK", "MCHP": "XLK",
-    "CTSH": "XLK", "ANSS": "XLK", "ADP":  "XLK", "PAYX": "XLK", "GFS":  "XLK",
-    "TTD":  "XLK", "PSTG": "XLK", "ARM":  "XLK",
+    "CTSH": "XLK", "ADP":  "XLK", "PAYX": "XLK", "GFS":  "XLK",
+    "TTD":  "XLK", "ARM":  "XLK",
     # XLC — Communication Services
     "META":  "XLC", "GOOGL": "XLC", "GOOG": "XLC", "NFLX": "XLC",
     "TTWO":  "XLC", "EA":    "XLC", "CMCSA":"XLC", "TMUS": "XLC",

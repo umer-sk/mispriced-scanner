@@ -212,20 +212,24 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
         underlying = data.get("underlying", {})
         stock_price = _safe_float(underlying.get("last") or underlying.get("mark") or data.get("underlyingPrice"))
 
-        # ATM IV30: use underlying volatility or derive from ATM options
-        iv30_raw = _safe_float(data.get("volatility") or underlying.get("thirtyDayVolatility"))
-        if iv30_raw == 0.0:
-            # Fallback: approximate from near-ATM call IV
-            atm_calls = []
-            call_map = data.get("callExpDateMap", {})
-            for exp_str, strike_map in call_map.items():
-                for strike_str, contracts in strike_map.items():
-                    if abs(float(strike_str) - stock_price) < stock_price * 0.02:
+        # ATM IV30: derive from near-ATM call IV (per-symbol; top-level data.volatility
+        # returns a market-wide value that is the same for all symbols)
+        atm_calls = []
+        call_map = data.get("callExpDateMap", {})
+        for exp_str, strike_map in call_map.items():
+            for strike_str, contracts in strike_map.items():
+                try:
+                    if abs(float(strike_str) - stock_price) < stock_price * 0.03:
                         for c in contracts:
                             iv = _safe_float(c.get("volatility"))
                             if iv > 0:
                                 atm_calls.append(iv)
-            iv30_raw = sum(atm_calls) / len(atm_calls) if atm_calls else 0.0
+                except (ValueError, TypeError):
+                    continue
+        if atm_calls:
+            iv30_raw = sum(atm_calls) / len(atm_calls)
+        else:
+            iv30_raw = _safe_float(underlying.get("thirtyDayVolatility") or data.get("volatility"))
 
         # Fetch 1 year of daily closes for HV30 + IV rank
         hist_resp = client.get_price_history(
