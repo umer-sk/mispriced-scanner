@@ -11,6 +11,16 @@ const SIGNAL_LABELS = {
   breakout:       'Near High',
 }
 
+const SIGNAL_TOOLTIPS = {
+  price_vs_ema21: 'Price is above the 21-day EMA — short-term momentum is up',
+  ema_alignment:  '13-day EMA is above 21-day EMA — EMAs are stacked bullishly',
+  stage2:         'Price > MA50 > MA200 — Minervini Stage 2 uptrend: price leads both averages',
+  rsi_zone:       'RSI(14) is between 45–75 and rising — in the momentum zone, not yet overbought',
+  volume_accum:   '5-day avg volume exceeds 20-day avg — institutional accumulation signal',
+  rs_vs_qqq:      'Stock outperformed QQQ over the last 10 days — showing relative strength vs the index',
+  breakout:       'Price is within 5% of its 50-day high — coiling near a potential breakout level',
+}
+
 function SignalBadges({ details, direction }) {
   return (
     <div style={styles.signals}>
@@ -18,7 +28,7 @@ function SignalBadges({ details, direction }) {
         const isBullishSignal = details[key]
         const firing = direction === 'bullish' ? isBullishSignal : !isBullishSignal
         return (
-          <span key={key} style={{ ...styles.signal, color: firing ? '#00ffaa' : '#333' }}>
+          <span key={key} style={{ ...styles.signal, color: firing ? '#00ffaa' : '#333' }} title={SIGNAL_TOOLTIPS[key]}>
             {firing ? '✓' : '·'} {label}
           </span>
         )
@@ -234,7 +244,7 @@ export default function TechnicalSetups() {
       {/* Filters */}
       <div style={styles.filterBar}>
         <div style={styles.filterGroup}>
-          <span style={styles.filterLabel}>DIRECTION</span>
+          <span style={styles.filterLabel} title="Filter by trade direction — bullish setups use calls/bull spreads, bearish use puts/bear spreads">DIRECTION</span>
           {['both', 'bullish', 'bearish'].map(d => (
             <button
               key={d}
@@ -246,7 +256,7 @@ export default function TechnicalSetups() {
           ))}
         </div>
         <div style={styles.filterGroup}>
-          <span style={styles.filterLabel}>MIN R:R</span>
+          <span style={styles.filterLabel} title="Minimum risk-to-reward ratio — e.g. 2.0 means max gain is at least 2× the premium paid">MIN R:R</span>
           <input
             type="range" min="1.0" max="5.0" step="0.5"
             value={filters.minRR}
@@ -256,12 +266,14 @@ export default function TechnicalSetups() {
           <span style={styles.filterVal}>{filters.minRR.toFixed(1)}:1</span>
         </div>
         <div style={styles.filterGroup}>
-          <span style={styles.filterLabel}>SORT</span>
+          <span style={styles.filterLabel} title="Sort order for the results list">SORT</span>
           <button
+            title="Sort by risk-to-reward ratio — highest reward per dollar risked first"
             style={{ ...styles.filterBtn, ...(filters.sort === 'rr' ? styles.filterBtnActive : {}) }}
             onClick={() => setFilters(f => ({ ...f, sort: 'rr' }))}
           >R:R</button>
           <button
+            title="Sort by probability of profit — highest chance of expiring in-the-money first"
             style={{ ...styles.filterBtn, ...(filters.sort === 'pop' ? styles.filterBtnActive : {}) }}
             onClick={() => setFilters(f => ({ ...f, sort: 'pop' }))}
           >PoP</button>
