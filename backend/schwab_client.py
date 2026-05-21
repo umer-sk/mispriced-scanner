@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import shutil
+import threading
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -49,18 +50,29 @@ _EFFECTIVE_TOKEN_PATH = _resolve_token_path()
 # In-process caches
 _last_chain_cache: dict[str, OptionChainData] = {}
 
+# Singleton Schwab client — each client_from_token_file creates a new httpx.Client
+# with its own SSL context (~5 MB). Creating one per symbol (95 symbols = ~475 MB)
+# causes OOM on Render's 512 MB free tier. Reuse one client for the process lifetime.
+_schwab_client: Optional[schwab.client.Client] = None
+_client_lock = threading.Lock()
+
 
 def _get_client() -> schwab.client.Client:
-    if not os.path.exists(_EFFECTIVE_TOKEN_PATH):
-        raise RuntimeError(
-            f"ERROR: token.json not found at {_EFFECTIVE_TOKEN_PATH}. "
-            "Run auth_setup.py locally and upload token.json to Render Secret Files."
-        )
-    return schwab.auth.client_from_token_file(
-        token_path=_EFFECTIVE_TOKEN_PATH,
-        api_key=SCHWAB_APP_KEY,
-        app_secret=SCHWAB_APP_SECRET,
-    )
+    global _schwab_client
+    if _schwab_client is None:
+        with _client_lock:
+            if _schwab_client is None:
+                if not os.path.exists(_EFFECTIVE_TOKEN_PATH):
+                    raise RuntimeError(
+                        f"ERROR: token.json not found at {_EFFECTIVE_TOKEN_PATH}. "
+                        "Run auth_setup.py locally and upload token.json to Render Secret Files."
+                    )
+                _schwab_client = schwab.auth.client_from_token_file(
+                    token_path=_EFFECTIVE_TOKEN_PATH,
+                    api_key=SCHWAB_APP_KEY,
+                    app_secret=SCHWAB_APP_SECRET,
+                )
+    return _schwab_client
 
 
 def _safe_float(val, default: float = 0.0) -> float:

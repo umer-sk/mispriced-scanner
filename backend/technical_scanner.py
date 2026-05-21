@@ -521,11 +521,12 @@ def scan_technical_setups(
 
     setups: list[TechnicalSetup] = []
 
-    for symbol, signal_count, details, atr, sig_direction in qualifying:
+    for i, (symbol, signal_count, details, atr, sig_direction) in enumerate(qualifying):
         try:
             chain = fetch_option_chain(symbol)
             if chain.stock_price == 0:
                 logger.warning("Technical scan: %s chain returned stock_price=0 (is_stale=%s)", symbol, chain.is_stale)
+                del chain
                 continue
 
             logger.info("Technical scan: %s stock=%.2f iv_rank=%.0f calls=%d puts=%d atr=%.2f dir=%s",
@@ -535,6 +536,7 @@ def scan_technical_setups(
                 symbol, chain.stock_price, chain,
                 sig_direction, signal_count, details, atr,
             )
+            del chain  # free 280+ OptionContract objects immediately
             if setup is None:
                 logger.info("Technical scan: %s no structure met R:R >= %.1f", symbol, min_rr)
                 continue
@@ -545,6 +547,9 @@ def scan_technical_setups(
 
         except Exception as e:
             logger.warning("Options structure failed for %s: %s", symbol, e)
+
+        if i % 15 == 14:
+            gc.collect()
 
     setups.sort(key=lambda s: s.rr_ratio, reverse=True)
     logger.info("Technical scan complete: %d setups found", len(setups))
