@@ -235,6 +235,14 @@ def _serialize(obj):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@app.post("/scan-now")
+@limiter.limit("2/minute")
+async def trigger_scan(request: Request, background_tasks: BackgroundTasks):
+    """Manually trigger a full scan regardless of day/time."""
+    background_tasks.add_task(_run_scan)
+    return {"status": "scan started"}
+
+
 @app.get("/health")
 @limiter.limit("30/minute")
 async def health(request: Request):

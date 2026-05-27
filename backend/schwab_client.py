@@ -165,7 +165,7 @@ def _compute_iv_rank(iv30: float, closes: list[float]) -> tuple[float, float]:
     if len(closes) < 32:
         return 50.0, 50.0
 
-    # Normalize IV30 to decimal (Schwab sometimes returns whole-number %)
+    # iv30 is already normalised to decimal by the caller; guard handles legacy callers
     iv_dec = iv30 / 100.0 if iv30 > 1.0 else iv30
 
     log_returns = [
@@ -243,6 +243,10 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
         else:
             iv30_raw = _safe_float(underlying.get("thirtyDayVolatility") or data.get("volatility"))
 
+        # Schwab returns per-contract volatility as whole-number percent (e.g. 29.5).
+        # Normalise to decimal so chain.iv30 is consistent with chain.hv30.
+        iv30 = iv30_raw / 100.0 if iv30_raw > 1.0 else iv30_raw
+
         # Fetch 1 year of daily closes for HV30 + IV rank
         hist_resp = client.get_price_history(
             symbol,
@@ -256,7 +260,7 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
         candles = hist_data.get("candles", [])
         closes = [c["close"] for c in candles if "close" in c]
         hv30 = _compute_hv30(closes[-31:])
-        iv_rank, iv_percentile = _compute_iv_rank(iv30_raw, closes)
+        iv_rank, iv_percentile = _compute_iv_rank(iv30, closes)
 
         calls = _parse_contracts(data.get("callExpDateMap", {}), stock_price)
         puts = _parse_contracts(data.get("putExpDateMap", {}), stock_price)
@@ -264,7 +268,7 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
         chain = OptionChainData(
             symbol=symbol,
             stock_price=stock_price,
-            iv30=iv30_raw,
+            iv30=iv30,
             hv30=hv30,
             iv_rank=iv_rank,
             iv_percentile=iv_percentile,
@@ -274,8 +278,7 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
             is_stale=False,
         )
         _last_chain_cache[symbol] = chain
-        iv30_pct = iv30_raw if iv30_raw <= 1.0 else iv30_raw / 100.0
-        logger.info(f"Fetched chain for {symbol}: stock=${stock_price:.2f} IV30={iv30_pct:.1%} HV30={hv30:.1%} IVR={iv_rank:.0f}")
+        logger.info(f"Fetched chain for {symbol}: stock=${stock_price:.2f} IV30={iv30:.1%} HV30={hv30:.1%} IVR={iv_rank:.0f}")
         return chain
 
     except Exception as e:
