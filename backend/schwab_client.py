@@ -8,10 +8,9 @@ import math
 import os
 import shutil
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-import httpx
 import schwab
 from dotenv import load_dotenv
 
@@ -89,7 +88,7 @@ def _safe_int(val, default: int = 0) -> int:
         return default
 
 
-def _parse_contracts(raw_map: dict, stock_price: float) -> list[OptionContract]:
+def _parse_contracts(raw_map: dict) -> list[OptionContract]:
     """Parse Schwab option chain map into OptionContract list.
     Schwab format: {expiry_str:days -> {strike_str -> [contracts]}}
     """
@@ -159,8 +158,8 @@ def _compute_iv_rank(iv30: float, closes: list[float]) -> tuple[float, float]:
     Compares current IV30 against the distribution of 30-day realized HV values
     computed from the past year of daily closes. Works correctly on fresh restarts.
 
-    iv30 may arrive as a decimal (0.29) or as a whole-number percent (29.0).
-    Both are normalised to decimal before comparison with the HV series.
+    iv30 must be in decimal form (e.g. 0.29); caller is responsible for normalisation.
+    Guard handles legacy whole-number values defensively.
     """
     if len(closes) < 32:
         return 50.0, 50.0
@@ -228,7 +227,7 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
         # returns a market-wide value that is the same for all symbols)
         atm_calls = []
         call_map = data.get("callExpDateMap", {})
-        for exp_str, strike_map in call_map.items():
+        for _, strike_map in call_map.items():
             for strike_str, contracts in strike_map.items():
                 try:
                     if abs(float(strike_str) - stock_price) < stock_price * 0.03:
@@ -262,8 +261,8 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
         hv30 = _compute_hv30(closes[-31:])
         iv_rank, iv_percentile = _compute_iv_rank(iv30, closes)
 
-        calls = _parse_contracts(data.get("callExpDateMap", {}), stock_price)
-        puts = _parse_contracts(data.get("putExpDateMap", {}), stock_price)
+        calls = _parse_contracts(data.get("callExpDateMap", {}))
+        puts = _parse_contracts(data.get("putExpDateMap", {}))
 
         chain = OptionChainData(
             symbol=symbol,
@@ -272,7 +271,7 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
             hv30=hv30,
             iv_rank=iv_rank,
             iv_percentile=iv_percentile,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             calls=calls,
             puts=puts,
             is_stale=False,
@@ -295,7 +294,7 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
             hv30=0.0,
             iv_rank=50.0,
             iv_percentile=50.0,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             calls=[],
             puts=[],
             is_stale=True,
