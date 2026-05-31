@@ -55,6 +55,21 @@ def _spread_pct(contract: OptionContract) -> float:
     return (contract.ask - contract.bid) / contract.mid
 
 
+def _find_delta_contract(contracts: list[OptionContract], target_delta: float) -> Optional[OptionContract]:
+    """Find contract nearest to target_delta in the 21–60 DTE window.
+
+    Rejects if the best candidate is more than 5 delta points away — avoids
+    returning a 5-delta or 20-delta contract when 10-delta liquidity is thin.
+    """
+    candidates = [c for c in contracts if 21 <= c.dte <= 60 and c.open_interest > 200 and c.iv > 0]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
+    if abs(abs(best.delta) - target_delta) > 0.05:
+        return None
+    return best
+
+
 # ---------------------------------------------------------------------------
 # Detector 1: IV Rank Underpricing
 # ---------------------------------------------------------------------------
@@ -111,29 +126,23 @@ def detect_skew_anomaly(chain: OptionChainData) -> Optional[MispricingSignal]:
     if chain.stock_price == 0:
         return None
 
-    # Find 10-delta contracts in the 21–60 DTE window
-    def find_delta_contract(contracts: list[OptionContract], target_delta: float) -> Optional[OptionContract]:
-        candidates = [c for c in contracts if 21 <= c.dte <= 60 and c.open_interest > 200 and c.iv > 0]
-        if not candidates:
-            return None
-        return min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
-
-    put_10d = find_delta_contract(chain.puts, 0.10)
-    call_10d = find_delta_contract(chain.calls, 0.10)
+    put_10d = _find_delta_contract(chain.puts, 0.10)
+    call_10d = _find_delta_contract(chain.calls, 0.10)
 
     if put_10d is None or call_10d is None:
         return None
 
     raw_skew = put_10d.iv - call_10d.iv
 
-    # Anomaly Type A — flat skew (calls underpriced vs puts)
+    # Anomaly Type A — flat/inverted skew: puts not commanding normal premium
+    # Normal equity skew: puts 5–15% IV above calls. Flat = market not pricing downside.
     if raw_skew < 0.03:
         return MispricingSignal(
             symbol=chain.symbol,
             detector="skew",
             description=(
-                f"Skew at {raw_skew:.1%} — calls significantly cheaper than puts. "
-                f"Normal equity skew is 5–15%. Calls underpriced vs skew curve."
+                f"Flat put/call skew: {raw_skew:.1%} vs normal 5–15%. "
+                f"Put IV not commanding usual crash premium — directional risk underpriced."
             ),
             confidence=0.75,
             raw_data={
@@ -143,18 +152,19 @@ def detect_skew_anomaly(chain: OptionChainData) -> Optional[MispricingSignal]:
             },
         )
 
-    # Anomaly Type B — specific strike mispriced via quadratic curve fit
-    # Use a single expiry with sufficient strikes
-    all_expiries = sorted(set(c.expiry for c in chain.calls if 21 <= c.dte <= 60))
+    # Anomaly Type B — specific strike mispriced via quadratic curve fit.
+    # Build the filtered list once and reuse it per-expiry.
+    window_calls = [c for c in chain.calls if 21 <= c.dte <= 60]
+    all_expiries = sorted(set(c.expiry for c in window_calls))
     if not all_expiries:
         return None
 
     best_signal = None
-    best_deviation = 0.0
+    best_quality = 0.0  # abs(deviation) * r_squared — prefers clean fits over noisy big deviations
 
     for expiry in all_expiries[:3]:  # Check first 3 expiries
         expiry_calls = [
-            c for c in chain.calls
+            c for c in window_calls
             if c.expiry == expiry and c.open_interest > 200 and c.iv > 0 and c.bid > 0
         ]
         if len(expiry_calls) < 5:
@@ -163,12 +173,10 @@ def detect_skew_anomaly(chain: OptionChainData) -> Optional[MispricingSignal]:
         strikes = np.array([c.strike for c in expiry_calls])
         ivs = np.array([c.iv for c in expiry_calls])
 
-        # Fit quadratic
         coeffs = np.polyfit(strikes, ivs, 2)
         fitted = np.polyval(coeffs, strikes)
         residuals = ivs - fitted
 
-        # R-squared
         ss_res = np.sum(residuals ** 2)
         ss_tot = np.sum((ivs - np.mean(ivs)) ** 2)
         r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0
@@ -176,12 +184,12 @@ def detect_skew_anomaly(chain: OptionChainData) -> Optional[MispricingSignal]:
         if r_squared < 0.75:
             continue
 
-        # Find strike with largest negative deviation (underpriced call)
         min_idx = int(np.argmin(residuals))
         min_deviation = residuals[min_idx]
+        quality = abs(float(min_deviation)) * r_squared
 
-        if min_deviation < -0.03 and abs(min_deviation) > abs(best_deviation):
-            best_deviation = min_deviation
+        if min_deviation < -0.03 and quality > best_quality:
+            best_quality = quality
             mispriced_contract = expiry_calls[min_idx]
             best_signal = MispricingSignal(
                 symbol=chain.symbol,
@@ -287,15 +295,19 @@ def detect_term_structure_gap(
         return None
 
     S = chain.stock_price
-    expiries = sorted(set(c.expiry for c in chain.calls if 7 <= c.dte <= 60))
-    if len(expiries) < 2:
+    today = date.today()
+
+    expiry_set = set(c.expiry for c in chain.calls if 7 <= c.dte <= 60)
+    if len(expiry_set) < 2:
         return None
+    expiry_1 = min(expiry_set)
+    expiry_2 = min(expiry_set - {expiry_1})
 
-    expiry_1 = expiries[0]
-    expiry_2 = expiries[1]
+    dte_1 = (expiry_1 - today).days
+    dte_2 = (expiry_2 - today).days
 
-    atm_1 = _atm_contract(chain.calls, S, dte_min=0, dte_max=(expiry_1 - date.today()).days + 1)
-    atm_2 = _atm_contract(chain.calls, S, dte_min=(expiry_1 - date.today()).days + 1, dte_max=65)
+    atm_1 = _atm_contract(chain.calls, S, dte_min=0, dte_max=dte_1)
+    atm_2 = _atm_contract(chain.calls, S, dte_min=dte_1 + 1, dte_max=dte_2)
 
     if atm_1 is None or atm_2 is None:
         return None
@@ -306,11 +318,9 @@ def detect_term_structure_gap(
     if backwardation <= 0.03:  # Need > 3 IV points of backwardation
         return None
 
-    dte_1 = (expiry_1 - date.today()).days
-
-    # Check if earnings explain the near-term spike
-    if earnings_date is not None and (earnings_date - date.today()).days <= dte_1:
-        return None  # Earnings within expiry_1 — expected behavior
+    # Earnings before expiry_2 explains the term structure gap — not a mispricing
+    if earnings_date is not None and earnings_date <= expiry_2:
+        return None
 
     return MispricingSignal(
         symbol=chain.symbol,
@@ -453,14 +463,8 @@ def detect_skew_inversion(chain: OptionChainData) -> Optional[MispricingSignal]:
     if chain.stock_price == 0:
         return None
 
-    def find_delta_contract(contracts, target_delta):
-        candidates = [c for c in contracts if 21 <= c.dte <= 60 and c.open_interest > 200 and c.iv > 0]
-        if not candidates:
-            return None
-        return min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
-
-    put_10d = find_delta_contract(chain.puts, 0.10)
-    call_10d = find_delta_contract(chain.calls, 0.10)
+    put_10d = _find_delta_contract(chain.puts, 0.10)
+    call_10d = _find_delta_contract(chain.calls, 0.10)
     if put_10d is None or call_10d is None:
         return None
 
