@@ -113,6 +113,7 @@ def _parse_contracts(raw_map: dict) -> list[OptionContract]:
                 ask = _safe_float(c.get("ask"))
                 mid = round((bid + ask) / 2, 2) if (bid + ask) > 0 else 0.0
 
+                iv_raw = _safe_float(c.get("volatility"))
                 contracts.append(OptionContract(
                     strike=strike,
                     expiry=exp_date,
@@ -123,7 +124,7 @@ def _parse_contracts(raw_map: dict) -> list[OptionContract]:
                     last=_safe_float(c.get("last")),
                     volume=_safe_int(c.get("totalVolume")),
                     open_interest=_safe_int(c.get("openInterest")),
-                    iv=_safe_float(c.get("volatility")),
+                    iv=iv_raw / 100.0 if iv_raw > 1.0 else iv_raw,
                     delta=_safe_float(c.get("delta")),
                     gamma=_safe_float(c.get("gamma")),
                     theta=_safe_float(c.get("theta")),
