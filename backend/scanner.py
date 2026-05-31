@@ -58,7 +58,7 @@ def _spread_pct(contract: OptionContract) -> float:
 def _find_skew_contracts(
     chain: OptionChainData,
     target_delta: float = 0.10,
-    dte_min: int = 21,
+    dte_min: int = 14,
     dte_max: int = 60,
 ) -> tuple[Optional[OptionContract], Optional[OptionContract]]:
     """Return a (put, call) pair at target_delta from the same expiry.
@@ -67,14 +67,17 @@ def _find_skew_contracts(
     both sides have a qualifying contract within 5 delta points. Enforcing the
     same expiry prevents cross-expiry IV comparisons that are corrupted by term
     structure differences.
+
+    OI thresholds differ: far-OTM calls (10-delta) are structurally less liquid
+    than puts, so calls use a lower floor (50 vs 200) to avoid always returning None.
     """
     expiries = sorted(set(
         c.expiry for c in chain.calls
-        if dte_min <= c.dte <= dte_max and c.open_interest > 200 and c.iv > 0
+        if dte_min <= c.dte <= dte_max and c.open_interest > 50 and c.iv > 0
     ))
     for expiry in expiries:
         puts_at = [p for p in chain.puts if p.expiry == expiry and p.open_interest > 200 and p.iv > 0]
-        calls_at = [c for c in chain.calls if c.expiry == expiry and c.open_interest > 200 and c.iv > 0]
+        calls_at = [c for c in chain.calls if c.expiry == expiry and c.open_interest > 50 and c.iv > 0]
         if not puts_at or not calls_at:
             continue
         best_put = min(puts_at, key=lambda p: abs(abs(p.delta) - target_delta))
@@ -780,9 +783,15 @@ def construct_best_spread(
     scenarios_10d = _calc_pnl_scenarios(long_leg, short_leg, net_debit, S, days=10)
     scenarios_expiry = _calc_pnl_scenarios(long_leg, short_leg, net_debit, S, days=dte, at_expiry=True)
 
-    # STEP 5 — Liquidity check (hard gate)
+    # STEP 5 — Liquidity check
     long_spread_pct = round(_spread_pct(long_leg) * 100, 1)
     short_spread_pct = round(_spread_pct(short_leg) * 100, 1)
+    # Hard gate: reject structurally untradeable setups (bad OI or wide spread).
+    # Volume is excluded from the hard gate — it is 0 outside market hours and
+    # should not block diagnostics or off-hours testing.
+    if (long_leg.open_interest < 100 or short_leg.open_interest < 100
+            or long_spread_pct > 15.0 or short_spread_pct > 15.0):
+        return None
     liquidity_ok = (
         long_leg.open_interest >= 100
         and short_leg.open_interest >= 100
@@ -790,8 +799,6 @@ def construct_best_spread(
         and long_spread_pct <= 10.0
         and short_spread_pct <= 10.0
     )
-    if not liquidity_ok:
-        return None
 
     # STEP 6 — Quality gate (hard gate)
     if rr_ratio < 2.0:
@@ -965,13 +972,14 @@ def construct_bear_put_spread(
     # STEP 5 — Liquidity check
     long_spread_pct  = round(_spread_pct(long_leg)  * 100, 1)
     short_spread_pct = round(_spread_pct(short_leg) * 100, 1)
+    if (long_leg.open_interest < 100 or short_leg.open_interest < 100
+            or long_spread_pct > 15.0 or short_spread_pct > 15.0):
+        return None
     liquidity_ok = (
         long_leg.open_interest  >= 100 and short_leg.open_interest >= 100
         and long_leg.volume >= 50
         and long_spread_pct  <= 10.0 and short_spread_pct <= 10.0
     )
-    if not liquidity_ok:
-        return None
 
     # STEP 6 — Quality gates
     if rr_ratio < 2.0 or net_debit > 8.0 or breakeven_move_pct > 10.0:
