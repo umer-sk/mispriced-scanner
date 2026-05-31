@@ -205,7 +205,7 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
     """
     client = _get_client()
     today = date.today()
-    to_date = today + timedelta(days=65)
+    to_date = today + timedelta(days=105)
 
     try:
         # Fetch option chain

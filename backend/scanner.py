@@ -29,7 +29,7 @@ RISK_FREE_RATE = 0.0525
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _atm_contract(contracts: list[OptionContract], stock_price: float, dte_min: int = 0, dte_max: int = 65) -> Optional[OptionContract]:
+def _atm_contract(contracts: list[OptionContract], stock_price: float, dte_min: int = 0, dte_max: int = 105) -> Optional[OptionContract]:
     """Find the contract closest to ATM within DTE range."""
     candidates = [c for c in contracts if dte_min <= c.dte <= dte_max and c.bid > 0]
     if not candidates:
@@ -61,7 +61,7 @@ def _find_delta_contract(contracts: list[OptionContract], target_delta: float) -
     Rejects if the best candidate is more than 5 delta points away — avoids
     returning a 5-delta or 20-delta contract when 10-delta liquidity is thin.
     """
-    candidates = [c for c in contracts if 21 <= c.dte <= 60 and c.open_interest > 200 and c.iv > 0]
+    candidates = [c for c in contracts if 21 <= c.dte <= 100 and c.open_interest > 200 and c.iv > 0]
     if not candidates:
         return None
     best = min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
@@ -154,7 +154,7 @@ def detect_skew_anomaly(chain: OptionChainData) -> Optional[MispricingSignal]:
 
     # Anomaly Type B — specific strike mispriced via quadratic curve fit.
     # Build the filtered list once and reuse it per-expiry.
-    window_calls = [c for c in chain.calls if 21 <= c.dte <= 60]
+    window_calls = [c for c in chain.calls if 21 <= c.dte <= 100]
     all_expiries = sorted(set(c.expiry for c in window_calls))
     if not all_expiries:
         return None
@@ -229,8 +229,8 @@ def detect_parity_violation(chain: OptionChainData) -> Optional[MispricingSignal
     best_signal = None
 
     # Group calls and puts by (strike, expiry)
-    call_map = {(c.strike, c.expiry): c for c in chain.calls if 14 <= c.dte <= 60}
-    put_map = {(p.strike, p.expiry): p for p in chain.puts if 14 <= p.dte <= 60}
+    call_map = {(c.strike, c.expiry): c for c in chain.calls if 14 <= c.dte <= 100}
+    put_map = {(p.strike, p.expiry): p for p in chain.puts if 14 <= p.dte <= 100}
 
     common_keys = set(call_map) & set(put_map)
 
@@ -297,7 +297,7 @@ def detect_term_structure_gap(
     S = chain.stock_price
     today = date.today()
 
-    expiry_set = set(c.expiry for c in chain.calls if 7 <= c.dte <= 60)
+    expiry_set = set(c.expiry for c in chain.calls if 7 <= c.dte <= 100)
     if len(expiry_set) < 2:
         return None
     expiry_1 = min(expiry_set)
@@ -355,8 +355,8 @@ def detect_move_underpricing(chain: OptionChainData) -> Optional[MispricingSigna
     S = chain.stock_price
 
     # Find nearest expiry ATM straddle (21–60 DTE)
-    atm_call = _atm_contract(chain.calls, S, dte_min=30, dte_max=60)
-    atm_put = _atm_contract(chain.puts, S, dte_min=30, dte_max=60)
+    atm_call = _atm_contract(chain.calls, S, dte_min=30, dte_max=100)
+    atm_put = _atm_contract(chain.puts, S, dte_min=30, dte_max=100)
 
     if atm_call is None or atm_put is None:
         return None
@@ -504,8 +504,8 @@ def detect_put_parity_violation(chain: OptionChainData) -> Optional[MispricingSi
     best_violation = 0.0
     best_signal = None
 
-    call_map = {(c.strike, c.expiry): c for c in chain.calls if 30 <= c.dte <= 60}
-    put_map  = {(p.strike, p.expiry): p for p in chain.puts  if 30 <= p.dte <= 60}
+    call_map = {(c.strike, c.expiry): c for c in chain.calls if 30 <= c.dte <= 100}
+    put_map  = {(p.strike, p.expiry): p for p in chain.puts  if 30 <= p.dte <= 100}
     common_keys = set(call_map) & set(put_map)
 
     for key in common_keys:
@@ -559,7 +559,7 @@ def detect_downside_move_underpricing(chain: OptionChainData) -> Optional[Mispri
         return None
 
     S = chain.stock_price
-    atm_put = _atm_contract(chain.puts, S, dte_min=30, dte_max=60)
+    atm_put = _atm_contract(chain.puts, S, dte_min=30, dte_max=100)
     if atm_put is None or atm_put.ask <= 0:
         return None
 
@@ -674,7 +674,7 @@ def construct_best_spread(
 
     # STEP 1 — Select expiry (28–50 DTE preferred, never < 21 or > 60)
     # If earnings within window: prefer expiry 7–14 days AFTER earnings
-    candidate_expiries = sorted(set(c.expiry for c in chain.calls if 30 <= c.dte <= 60))
+    candidate_expiries = sorted(set(c.expiry for c in chain.calls if 30 <= c.dte <= 100))
     if not candidate_expiries:
         return None
 
@@ -781,7 +781,7 @@ def construct_best_spread(
         return None
     if breakeven_move_pct > 10.0:
         return None
-    if not (30 <= dte <= 60):
+    if not (30 <= dte <= 100):
         return None
 
     # STEP 7 — Broker order string
@@ -844,7 +844,7 @@ def construct_bear_put_spread(
         return None
 
     # STEP 1 — Select expiry (30–50 DTE preferred)
-    candidate_expiries = sorted(set(c.expiry for c in chain.puts if 30 <= c.dte <= 60))
+    candidate_expiries = sorted(set(c.expiry for c in chain.puts if 30 <= c.dte <= 100))
     if not candidate_expiries:
         return None
 
@@ -957,7 +957,7 @@ def construct_bear_put_spread(
     # STEP 6 — Quality gates
     if rr_ratio < 2.0 or net_debit > 8.0 or breakeven_move_pct > 10.0:
         return None
-    if not (30 <= dte <= 60):
+    if not (30 <= dte <= 100):
         return None
 
     # STEP 7 — Order string
