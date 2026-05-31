@@ -383,3 +383,42 @@ async def get_opportunity(request: Request, symbol: str):
     # Return the highest-scored setup for this symbol
     best = max(matches, key=lambda s: s.score)
     return JSONResponse(content=_serialize(best))
+
+
+@app.get("/chain/{symbol}")
+@limiter.limit("5/minute")
+async def get_chain_debug(request: Request, symbol: str):
+    """Debug: fetch chain for one symbol and return key diagnostic fields."""
+    chain = await asyncio.get_event_loop().run_in_executor(
+        None, fetch_option_chain, symbol.upper()
+    )
+
+    def _fmt(c):
+        return {"strike": c.strike, "dte": c.dte, "bid": c.bid, "ask": c.ask,
+                "iv": round(c.iv, 4), "delta": round(c.delta, 3), "oi": c.open_interest}
+
+    atm_calls = sorted(
+        [c for c in chain.calls if c.bid > 0 or c.iv > 0],
+        key=lambda c: abs(c.delta - 0.5)
+    )[:5]
+    near_10d_puts = sorted(
+        [p for p in chain.puts if p.bid > 0 or p.iv > 0],
+        key=lambda p: abs(abs(p.delta) - 0.1)
+    )[:5]
+
+    return JSONResponse(content={
+        "symbol": chain.symbol,
+        "stock_price": chain.stock_price,
+        "iv30": chain.iv30,
+        "hv30": chain.hv30,
+        "iv_rank": chain.iv_rank,
+        "is_stale": chain.is_stale,
+        "calls_total": len(chain.calls),
+        "puts_total": len(chain.puts),
+        "calls_with_iv": sum(1 for c in chain.calls if c.iv > 0),
+        "calls_with_bid": sum(1 for c in chain.calls if c.bid > 0),
+        "puts_with_iv": sum(1 for p in chain.puts if p.iv > 0),
+        "puts_with_bid": sum(1 for p in chain.puts if p.bid > 0),
+        "atm_calls_sample": [_fmt(c) for c in atm_calls],
+        "near_10d_puts_sample": [_fmt(p) for p in near_10d_puts],
+    })
