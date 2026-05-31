@@ -55,19 +55,36 @@ def _spread_pct(contract: OptionContract) -> float:
     return (contract.ask - contract.bid) / contract.mid
 
 
-def _find_delta_contract(contracts: list[OptionContract], target_delta: float) -> Optional[OptionContract]:
-    """Find contract nearest to target_delta in the 21–60 DTE window.
+def _find_skew_contracts(
+    chain: OptionChainData,
+    target_delta: float = 0.10,
+    dte_min: int = 21,
+    dte_max: int = 60,
+) -> tuple[Optional[OptionContract], Optional[OptionContract]]:
+    """Return a (put, call) pair at target_delta from the same expiry.
 
-    Rejects if the best candidate is more than 5 delta points away — avoids
-    returning a 5-delta or 20-delta contract when 10-delta liquidity is thin.
+    Iterates expiries in ascending DTE order and returns the first expiry where
+    both sides have a qualifying contract within 5 delta points. Enforcing the
+    same expiry prevents cross-expiry IV comparisons that are corrupted by term
+    structure differences.
     """
-    candidates = [c for c in contracts if 21 <= c.dte <= 100 and c.open_interest > 200 and c.iv > 0]
-    if not candidates:
-        return None
-    best = min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
-    if abs(abs(best.delta) - target_delta) > 0.05:
-        return None
-    return best
+    expiries = sorted(set(
+        c.expiry for c in chain.calls
+        if dte_min <= c.dte <= dte_max and c.open_interest > 200 and c.iv > 0
+    ))
+    for expiry in expiries:
+        puts_at = [p for p in chain.puts if p.expiry == expiry and p.open_interest > 200 and p.iv > 0]
+        calls_at = [c for c in chain.calls if c.expiry == expiry and c.open_interest > 200 and c.iv > 0]
+        if not puts_at or not calls_at:
+            continue
+        best_put = min(puts_at, key=lambda p: abs(abs(p.delta) - target_delta))
+        best_call = min(calls_at, key=lambda c: abs(abs(c.delta) - target_delta))
+        if abs(abs(best_put.delta) - target_delta) > 0.05:
+            continue
+        if abs(abs(best_call.delta) - target_delta) > 0.05:
+            continue
+        return best_put, best_call
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -126,8 +143,7 @@ def detect_skew_anomaly(chain: OptionChainData) -> Optional[MispricingSignal]:
     if chain.stock_price == 0:
         return None
 
-    put_10d = _find_delta_contract(chain.puts, 0.10)
-    call_10d = _find_delta_contract(chain.calls, 0.10)
+    put_10d, call_10d = _find_skew_contracts(chain)
 
     if put_10d is None or call_10d is None:
         return None
@@ -153,8 +169,8 @@ def detect_skew_anomaly(chain: OptionChainData) -> Optional[MispricingSignal]:
         )
 
     # Anomaly Type B — specific strike mispriced via quadratic curve fit.
-    # Build the filtered list once and reuse it per-expiry.
-    window_calls = [c for c in chain.calls if 21 <= c.dte <= 100]
+    # 30-DTE minimum avoids near-term weeklies that have too few OTM strikes with OI>200.
+    window_calls = [c for c in chain.calls if 30 <= c.dte <= 100]
     all_expiries = sorted(set(c.expiry for c in window_calls))
     if not all_expiries:
         return None
@@ -297,11 +313,15 @@ def detect_term_structure_gap(
     S = chain.stock_price
     today = date.today()
 
-    expiry_set = set(c.expiry for c in chain.calls if 7 <= c.dte <= 100)
-    if len(expiry_set) < 2:
+    # Minimum 14 DTE avoids same-week noise; 14-day gap filters consecutive weeklies.
+    expiry_list = sorted(set(c.expiry for c in chain.calls if 14 <= c.dte <= 100))
+    if len(expiry_list) < 2:
         return None
-    expiry_1 = min(expiry_set)
-    expiry_2 = min(expiry_set - {expiry_1})
+    expiry_1 = expiry_list[0]
+    gap_candidates = [e for e in expiry_list if (e - expiry_1).days >= 14]
+    if not gap_candidates:
+        return None
+    expiry_2 = gap_candidates[0]
 
     dte_1 = (expiry_1 - today).days
     dte_2 = (expiry_2 - today).days
@@ -463,8 +483,7 @@ def detect_skew_inversion(chain: OptionChainData) -> Optional[MispricingSignal]:
     if chain.stock_price == 0:
         return None
 
-    put_10d = _find_delta_contract(chain.puts, 0.10)
-    call_10d = _find_delta_contract(chain.calls, 0.10)
+    put_10d, call_10d = _find_skew_contracts(chain)
     if put_10d is None or call_10d is None:
         return None
 
