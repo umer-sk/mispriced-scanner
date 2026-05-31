@@ -75,6 +75,7 @@ _cache: dict = {
     "technical_setups": [],   # list[TechnicalSetup]
     "technical_timestamp": None, # datetime
     "technical_symbols_scanned": 0,  # int
+    "last_scan_stats": None,  # dict with diagnostic counts from last scan
 }
 
 
@@ -106,9 +107,11 @@ async def _run_scan() -> None:
 
         # 4–6. Run detectors, construct spreads, score
         all_setups: list[TradeSetup] = []
+        chains_ok = 0
         for chain in chains:
             if chain.stock_price == 0:
                 continue
+            chains_ok += 1
             catalyst = get_catalyst_context(chain.symbol, chain, trade_dte=35)
             tech_ctx = tech_contexts.get(chain.symbol)
             setups = run_all_detectors(chain, catalyst, technical_context=tech_ctx)
@@ -121,14 +124,34 @@ async def _run_scan() -> None:
         ]
         filtered.sort(key=lambda s: s.score, reverse=True)
 
+        scores = [s.score for s in all_setups]
+        _cache["last_scan_stats"] = {
+            "chains_fetched": chains_ok,
+            "chains_total": len(chains),
+            "setups_raw": len(all_setups),
+            "setups_passing": len(filtered),
+            "max_score": max(scores) if scores else 0,
+            "score_distribution": {
+                ">=55": sum(1 for s in scores if s >= 55),
+                "40-54": sum(1 for s in scores if 40 <= s < 55),
+                "<40":   sum(1 for s in scores if s < 40),
+            },
+            "by_detector": {
+                det: sum(1 for s in all_setups if s.signal.detector == det)
+                for det in ["iv_rank", "skew", "parity", "term", "move",
+                            "put_iv_rank", "skew_inversion", "put_parity", "downside_move"]
+            },
+        }
+
         _cache["opportunities"] = filtered
         _cache["scan_timestamp"] = datetime.utcnow()
         _cache["symbols_scanned"] = len(QQQ_TOP50)
 
         elapsed = time.monotonic() - t_start
         logger.info(
-            "Scan complete: %d symbols, %d signals total, %d opportunities, %.1fs",
-            len(QQQ_TOP50), len(all_setups), len(filtered), elapsed,
+            "Scan complete: %d/%d chains ok, %d setups raw, %d opportunities, max_score=%d, %.1fs",
+            chains_ok, len(chains), len(all_setups), len(filtered),
+            max(scores) if scores else 0, elapsed,
         )
 
     except Exception as e:
@@ -255,6 +278,7 @@ async def health(request: Request):
         "market_open": _is_market_open(),
         "next_scan": _cache["market_context"].next_scan_time if _cache["market_context"] else None,
         "token_age_days": round(_token_age_days(), 2),
+        "last_scan_stats": _cache.get("last_scan_stats"),
     }
 
 
