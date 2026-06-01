@@ -102,7 +102,7 @@ def detect_iv_rank_cheap(chain: OptionChainData) -> Optional[MispricingSignal]:
         return None
 
     ivr = chain.iv_rank
-    if ivr >= 25:
+    if ivr >= 35:
         return None
     if chain.iv30 >= chain.hv30:
         return None
@@ -115,8 +115,10 @@ def detect_iv_rank_cheap(chain: OptionChainData) -> Optional[MispricingSignal]:
         confidence = 0.95
     elif ivr <= 18:
         confidence = 0.85
-    else:
+    elif ivr <= 25:
         confidence = 0.70
+    else:
+        confidence = 0.55
 
     return MispricingSignal(
         symbol=chain.symbol,
@@ -154,13 +156,13 @@ def detect_skew_anomaly(chain: OptionChainData) -> Optional[MispricingSignal]:
     raw_skew = put_10d.iv - call_10d.iv
 
     # Anomaly Type A — flat/inverted skew: puts not commanding normal premium
-    # Normal equity skew: puts 5–15% IV above calls. Flat = market not pricing downside.
-    if raw_skew < 0.03:
+    # Normal equity skew: puts 7–15% IV above calls at 10-delta. Flat = < 5%.
+    if raw_skew < 0.05:
         return MispricingSignal(
             symbol=chain.symbol,
             detector="skew",
             description=(
-                f"Flat put/call skew: {raw_skew:.1%} vs normal 5–15%. "
+                f"Flat put/call skew: {raw_skew:.1%} vs normal 7–15%. "
                 f"Put IV not commanding usual crash premium — directional risk underpriced."
             ),
             confidence=0.75,
@@ -408,15 +410,17 @@ def detect_move_underpricing(chain: OptionChainData) -> Optional[MispricingSigna
         return None
 
     ratio = implied_move_pct / expected_move_pct
-    if ratio >= 0.80:
+    if ratio >= 0.85:
         return None
 
     if ratio < 0.65:
         confidence = 0.90
     elif ratio < 0.75:
         confidence = 0.75
-    else:
+    elif ratio < 0.80:
         confidence = 0.60
+    else:
+        confidence = 0.45
 
     return MispricingSignal(
         symbol=chain.symbol,
@@ -443,10 +447,10 @@ def detect_move_underpricing(chain: OptionChainData) -> Optional[MispricingSigna
 # ---------------------------------------------------------------------------
 
 def detect_put_iv_rank_cheap(chain: OptionChainData) -> Optional[MispricingSignal]:
-    """Fire when IV rank < 25%, iv30 < hv30, and put flow dominates (bearish)."""
+    """Fire when IV rank < 35%, iv30 < hv30, and put flow dominates (bearish)."""
     if chain.stock_price == 0 or chain.iv30 == 0:
         return None
-    if chain.iv_rank >= 25:
+    if chain.iv_rank >= 35:
         return None
     if chain.iv30 >= chain.hv30:
         return None
@@ -457,7 +461,7 @@ def detect_put_iv_rank_cheap(chain: OptionChainData) -> Optional[MispricingSigna
         return None
 
     ivr = chain.iv_rank
-    confidence = 0.95 if ivr <= 10 else (0.85 if ivr <= 18 else 0.70)
+    confidence = 0.95 if ivr <= 10 else (0.85 if ivr <= 18 else (0.70 if ivr <= 25 else 0.55))
 
     return MispricingSignal(
         symbol=chain.symbol,
@@ -491,14 +495,14 @@ def detect_skew_inversion(chain: OptionChainData) -> Optional[MispricingSignal]:
         return None
 
     raw_skew = put_10d.iv - call_10d.iv
-    if raw_skew >= 0.03:
+    if raw_skew >= 0.05:
         return None
 
     return MispricingSignal(
         symbol=chain.symbol,
         detector="skew_inversion",
         description=(
-            f"Put/call skew at {raw_skew:.1%} — nearly flat vs normal 5–15%. "
+            f"Put/call skew at {raw_skew:.1%} — nearly flat vs normal 7–15%. "
             f"Market underpricing downside protection. Puts cheap relative to calls."
         ),
         confidence=0.75,
@@ -594,10 +598,10 @@ def detect_downside_move_underpricing(chain: OptionChainData) -> Optional[Mispri
         return None
 
     ratio = implied_downside_pct / expected_downside_pct
-    if ratio >= 0.80:
+    if ratio >= 0.85:
         return None
 
-    confidence = 0.90 if ratio < 0.65 else (0.75 if ratio < 0.75 else 0.60)
+    confidence = 0.90 if ratio < 0.65 else (0.75 if ratio < 0.75 else (0.60 if ratio < 0.80 else 0.45))
 
     return MispricingSignal(
         symbol=chain.symbol,

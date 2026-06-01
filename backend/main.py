@@ -120,7 +120,7 @@ async def _run_scan() -> None:
         # 6. Filter
         filtered = [
             s for s in all_setups
-            if s.score >= 55 and s.rr_ratio >= 2.0 and s.liquidity_ok
+            if s.score >= 45 and s.rr_ratio >= 2.0 and s.liquidity_ok
         ]
         filtered.sort(key=lambda s: s.score, reverse=True)
 
