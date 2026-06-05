@@ -31,6 +31,8 @@ from sector_analysis import get_sector_analysis
 from technical_analysis import get_technical_contexts
 from technical_scanner import scan_technical_setups
 from schwab_client import fetch_all_chains, fetch_option_chain
+from celt_scanner import scan_celt_setups
+from supabase_client import load_scan_results, save_scan_results
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,6 +78,8 @@ _cache: dict = {
     "technical_timestamp": None, # datetime
     "technical_symbols_scanned": 0,  # int
     "last_scan_stats": None,  # dict with diagnostic counts from last scan
+    "celt_setups": [],        # list[CeltSetup]
+    "celt_timestamp": None,   # datetime
 }
 
 
@@ -147,6 +151,8 @@ async def _run_scan() -> None:
         _cache["scan_timestamp"] = datetime.utcnow()
         _cache["symbols_scanned"] = len(QQQ_TOP50)
 
+        save_scan_results("opportunities", [_serialize(s) for s in filtered], datetime.utcnow())
+
         elapsed = time.monotonic() - t_start
         logger.info(
             "Scan complete: %d/%d chains ok, %d setups raw, %d opportunities, max_score=%d, %.1fs",
@@ -156,6 +162,23 @@ async def _run_scan() -> None:
 
     except Exception as e:
         logger.exception("Scan failed: %s", e)
+
+
+async def _run_celt_scan() -> None:
+    """Fetch closes + LEAP chains for all symbols, find CELT setups."""
+    t_start = time.monotonic()
+    logger.info("Starting CELT scan of %d symbols", len(QQQ_TOP50))
+    try:
+        loop = asyncio.get_event_loop()
+        setups = await loop.run_in_executor(None, scan_celt_setups, QQQ_TOP50)
+        if setups:
+            _cache["celt_setups"] = setups
+        _cache["celt_timestamp"] = datetime.utcnow()
+        save_scan_results("celt_results", [_serialize(s) for s in setups], datetime.utcnow())
+        elapsed = time.monotonic() - t_start
+        logger.info("CELT scan complete: %d setups, %.1fs", len(setups), elapsed)
+    except Exception as e:
+        logger.error("CELT scan failed: %s", e)
 
 
 async def _run_technical_scan() -> None:
@@ -211,12 +234,33 @@ scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=9, minute=45
 scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=11, minute=0, timezone=ET))
 scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=15, minute=45, timezone=ET))
 scheduler.add_job(refresh_sector_analysis, CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone=ET))
+scheduler.add_job(_run_celt_scan, CronTrigger(day_of_week="mon-fri", hour=16, minute=15, timezone=ET))
 
 
 @app.on_event("startup")
 async def startup():
     scheduler.start()
     logger.info("Scheduler started")
+
+    # Load persisted results so cold starts serve last known data
+    try:
+        from models import CeltSetup
+        opps_raw, opps_ts = load_scan_results("opportunities")
+        if opps_raw and opps_ts:
+            _cache["scan_timestamp"] = opps_ts
+            _cache["symbols_scanned"] = len(opps_raw)
+            logger.info("Loaded %d opportunities from Supabase (as_of=%s)", len(opps_raw), opps_ts)
+    except Exception as e:
+        logger.warning("Could not load opportunities from Supabase: %s", e)
+
+    try:
+        celt_raw, celt_ts = load_scan_results("celt_results")
+        if celt_raw and celt_ts:
+            _cache["celt_timestamp"] = celt_ts
+            logger.info("Loaded %d CELT setups from Supabase (as_of=%s)", len(celt_raw), celt_ts)
+    except Exception as e:
+        logger.warning("Could not load CELT results from Supabase: %s", e)
+
     asyncio.create_task(refresh_sector_analysis())
 
 
@@ -279,6 +323,8 @@ async def health(request: Request):
         "next_scan": _cache["market_context"].next_scan_time if _cache["market_context"] else None,
         "token_age_days": round(_token_age_days(), 2),
         "last_scan_stats": _cache.get("last_scan_stats"),
+        "celt_last_scan": _cache["celt_timestamp"].isoformat() if _cache["celt_timestamp"] else None,
+        "celt_setups_count": len(_cache["celt_setups"]),
     }
 
 
@@ -383,6 +429,38 @@ async def get_opportunity(request: Request, symbol: str):
     # Return the highest-scored setup for this symbol
     best = max(matches, key=lambda s: s.score)
     return JSONResponse(content=_serialize(best))
+
+
+@app.get("/celt-setups")
+@limiter.limit("10/minute")
+async def get_celt_setups(
+    request: Request,
+    min_score: float = 2.2,
+    sort: str = "score",
+):
+    setups = _cache["celt_setups"]
+    ts = _cache["celt_timestamp"]
+
+    filtered = [s for s in setups if s.signal_score >= min_score]
+    if sort == "drawdown":
+        filtered.sort(key=lambda s: s.drawdown_pct, reverse=True)
+    elif sort == "ivrank":
+        filtered.sort(key=lambda s: s.iv_rank, reverse=True)
+    else:
+        filtered.sort(key=lambda s: s.signal_score, reverse=True)
+
+    return JSONResponse(content={
+        "setups": [_serialize(s) for s in filtered],
+        "scan_timestamp": ts.isoformat() if ts else None,
+        "symbols_scanned": len(QQQ_TOP50),
+    })
+
+
+@app.get("/scan-celt")
+@limiter.limit("3/minute")
+async def trigger_celt_scan(request: Request, background_tasks: BackgroundTasks):
+    background_tasks.add_task(_run_celt_scan)
+    return JSONResponse(content={"status": "scanning", "message": "CELT scan started. Fetch /celt-setups in ~60s."})
 
 
 @app.get("/chain/{symbol}")

@@ -170,6 +170,43 @@ class SectorData:
 
 
 @dataclass
+class CeltSetup:
+    symbol: str
+    stock_price: float
+    timestamp: datetime
+
+    signal_score: float        # total weighted (max 3.2)
+    price_damage_score: float
+    volatility_score: float
+    sentiment_score: float
+
+    drawdown_pct: float
+    below_200sma: bool
+    pct_from_200sma: float
+
+    hv30: float
+    hv60: float
+    hv_ratio: float            # HV30 / 1yr-avg HV
+    hv_expansion: float        # HV30 / HV60
+
+    iv_rank: float
+    leap_put_call_oi_ratio: float
+
+    leap_strike: float
+    leap_expiry: date
+    leap_dte: int
+    leap_delta: float
+    leap_ask: float
+    leap_bid: float
+    leap_mid: float
+    leap_oi: int
+    leap_iv: float
+
+    confidence: int            # 0–100
+    entry_notes: str
+
+
+@dataclass
 class TechnicalSetup:
     # Identity
     symbol: str

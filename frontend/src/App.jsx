@@ -4,6 +4,7 @@ import Dashboard from './components/Dashboard.jsx'
 import TradeJournal from './components/TradeJournal.jsx'
 import SectorStrip from './components/SectorStrip.jsx'
 import TechnicalSetups from './components/TechnicalSetups.jsx'
+import CeltSetups from './components/CeltSetups.jsx'
 
 const REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes
 
@@ -111,6 +112,12 @@ export default function App() {
           SETUPS
         </button>
         <button
+          style={{ ...styles.tab, ...(tab === 'celt' ? styles.tabActive : {}) }}
+          onClick={() => setTab('celt')}
+        >
+          CRASH LEAPS
+        </button>
+        <button
           style={{ ...styles.tab, ...(tab === 'journal' ? styles.tabActive : {}) }}
           onClick={() => setTab('journal')}
         >
@@ -136,6 +143,7 @@ export default function App() {
         </>
       )}
       {tab === 'setups' && <TechnicalSetups />}
+      {tab === 'celt' && <CeltSetups />}
       {tab === 'journal' && <TradeJournal />}
     </div>
   )

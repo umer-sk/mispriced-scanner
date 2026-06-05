@@ -48,3 +48,19 @@ export async function triggerSetupsScan() {
   if (!res.ok) throw new Error(`Setups scan failed: ${res.status}`)
   return res.json()
 }
+
+export async function fetchCeltSetups(filters = {}) {
+  const params = new URLSearchParams({
+    min_score: filters.minScore ?? 2.2,
+    sort: filters.sort ?? 'score',
+  })
+  const res = await fetch(`${BASE_URL}/celt-setups?${params}`)
+  if (!res.ok) throw new Error(`CELT setups error: ${res.status}`)
+  return res.json()
+}
+
+export async function triggerCeltScan() {
+  const res = await fetch(`${BASE_URL}/scan-celt`)
+  if (!res.ok) throw new Error(`CELT scan failed: ${res.status}`)
+  return res.json()
+}

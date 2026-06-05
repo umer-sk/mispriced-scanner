@@ -197,7 +197,7 @@ def _compute_iv_rank(iv30: float, closes: list[float]) -> tuple[float, float]:
     return iv_rank, iv_percentile
 
 
-def fetch_option_chain(symbol: str) -> OptionChainData:
+def fetch_option_chain(symbol: str, days_out: int = 105) -> OptionChainData:
     """
     Fetch full option chain for a symbol.
     On API failure, returns last cached result with is_stale=True.
@@ -205,7 +205,7 @@ def fetch_option_chain(symbol: str) -> OptionChainData:
     """
     client = _get_client()
     today = date.today()
-    to_date = today + timedelta(days=105)
+    to_date = today + timedelta(days=days_out)
 
     try:
         # Fetch option chain
