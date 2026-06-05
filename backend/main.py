@@ -194,6 +194,7 @@ async def _run_technical_scan() -> None:
             _cache["technical_setups"] = setups
         _cache["technical_timestamp"] = datetime.utcnow()
         _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
+        save_scan_results("technical_setups", [_serialize(s) for s in _cache["technical_setups"]], datetime.utcnow())
         elapsed = time.monotonic() - t_start
         logger.info("Technical scan complete: %d setups (cache has %d), %.1fs",
                     len(setups), len(_cache["technical_setups"]), elapsed)
@@ -244,9 +245,9 @@ async def startup():
 
     # Load persisted results so cold starts serve last known data
     try:
-        from models import CeltSetup
         opps_raw, opps_ts = load_scan_results("opportunities")
         if opps_raw and opps_ts:
+            _cache["opportunities"] = opps_raw   # plain dicts — _attr() handles these
             _cache["scan_timestamp"] = opps_ts
             _cache["symbols_scanned"] = len(opps_raw)
             logger.info("Loaded %d opportunities from Supabase (as_of=%s)", len(opps_raw), opps_ts)
@@ -254,8 +255,19 @@ async def startup():
         logger.warning("Could not load opportunities from Supabase: %s", e)
 
     try:
+        tech_raw, tech_ts = load_scan_results("technical_setups")
+        if tech_raw and tech_ts:
+            _cache["technical_setups"] = tech_raw
+            _cache["technical_timestamp"] = tech_ts
+            _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
+            logger.info("Loaded %d technical setups from Supabase (as_of=%s)", len(tech_raw), tech_ts)
+    except Exception as e:
+        logger.warning("Could not load technical setups from Supabase: %s", e)
+
+    try:
         celt_raw, celt_ts = load_scan_results("celt_results")
         if celt_raw and celt_ts:
+            _cache["celt_setups"] = celt_raw     # plain dicts — _attr() handles these
             _cache["celt_timestamp"] = celt_ts
             logger.info("Loaded %d CELT setups from Supabase (as_of=%s)", len(celt_raw), celt_ts)
     except Exception as e:
@@ -295,6 +307,15 @@ def _serialize(obj):
         return obj.isoformat()
     if isinstance(obj, date):
         return obj.isoformat()
+    return obj
+
+
+def _attr(obj, *keys, default=None):
+    """Read nested attribute from either a dataclass or a plain dict (Supabase-loaded)."""
+    for key in keys:
+        if obj is None:
+            return default
+        obj = obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
     return obj
 
 
@@ -350,14 +371,14 @@ async def get_technical_setups(
 
     filtered = [
         s for s in setups
-        if s.rr_ratio >= min_rr
-        and (direction == "both" or s.direction == direction)
+        if _attr(s, 'rr_ratio', default=0) >= min_rr
+        and (direction == "both" or _attr(s, 'direction', default='') == direction)
     ]
 
     if sort == "pop":
-        filtered.sort(key=lambda s: s.probability_of_profit, reverse=True)
+        filtered.sort(key=lambda s: _attr(s, 'probability_of_profit', default=0), reverse=True)
     else:
-        filtered.sort(key=lambda s: s.rr_ratio, reverse=True)
+        filtered.sort(key=lambda s: _attr(s, 'rr_ratio', default=0), reverse=True)
 
     return JSONResponse(content={
         "setups": [_serialize(s) for s in filtered],
@@ -388,14 +409,14 @@ async def get_opportunities(
     # Apply filters
     filtered = [
         s for s in opps
-        if s.rr_ratio >= min_rr
-        and s.net_debit <= max_debit
-        and s.score >= min_score
-        and (detector == "all" or s.signal.detector == detector)
+        if _attr(s, 'rr_ratio', default=0) >= min_rr
+        and _attr(s, 'net_debit', default=999) <= max_debit
+        and _attr(s, 'score', default=0) >= min_score
+        and (detector == "all" or _attr(s, 'signal', 'detector', default='') == detector)
         and (
             direction == "both"
-            or (direction == "bullish" and s.structure in ("bull_call_spread", "calendar", "long_call"))
-            or (direction == "bearish" and s.structure == "bear_put_spread")
+            or (direction == "bullish" and _attr(s, 'structure', default='') in ("bull_call_spread", "calendar", "long_call"))
+            or (direction == "bearish" and _attr(s, 'structure', default='') == "bear_put_spread")
         )
     ]
 
@@ -423,11 +444,10 @@ async def trigger_scan(request: Request, background_tasks: BackgroundTasks):
 @limiter.limit("10/minute")
 async def get_opportunity(request: Request, symbol: str):
     symbol = symbol.upper()
-    matches = [s for s in _cache["opportunities"] if s.symbol == symbol]
+    matches = [s for s in _cache["opportunities"] if _attr(s, 'symbol', default='') == symbol]
     if not matches:
         raise HTTPException(status_code=404, detail=f"No opportunity found for {symbol}")
-    # Return the highest-scored setup for this symbol
-    best = max(matches, key=lambda s: s.score)
+    best = max(matches, key=lambda s: _attr(s, 'score', default=0))
     return JSONResponse(content=_serialize(best))
 
 
@@ -441,13 +461,13 @@ async def get_celt_setups(
     setups = _cache["celt_setups"]
     ts = _cache["celt_timestamp"]
 
-    filtered = [s for s in setups if s.signal_score >= min_score]
+    filtered = [s for s in setups if _attr(s, 'signal_score', default=0) >= min_score]
     if sort == "drawdown":
-        filtered.sort(key=lambda s: s.drawdown_pct, reverse=True)
+        filtered.sort(key=lambda s: _attr(s, 'drawdown_pct', default=0), reverse=True)
     elif sort == "ivrank":
-        filtered.sort(key=lambda s: s.iv_rank, reverse=True)
+        filtered.sort(key=lambda s: _attr(s, 'iv_rank', default=0), reverse=True)
     else:
-        filtered.sort(key=lambda s: s.signal_score, reverse=True)
+        filtered.sort(key=lambda s: _attr(s, 'signal_score', default=0), reverse=True)
 
     return JSONResponse(content={
         "setups": [_serialize(s) for s in filtered],
