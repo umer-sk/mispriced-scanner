@@ -1,10 +1,16 @@
 import { useState, useEffect, useRef } from 'react'
 import { fetchCeltSetups, triggerCeltScan, fetchHealth } from '../api.js'
 
+const SCORE_BAR_TIPS = {
+  Price: 'Price Damage (0–1.0): how far the stock has fallen from its 52-week high. ≥40% drawdown = full score.',
+  HV:    'HV Elevation (0–1.0): current 30-day volatility vs its 1-year average. ≥2× average = full score.',
+  Sent:  'Sentiment Capitulation (0–1.2): IV rank + put/call LEAP open-interest skew, weighted ×1.2. High = fear peak.',
+}
+
 function ScoreBar({ label, value, max }) {
   const pct = Math.min(100, (value / max) * 100)
   return (
-    <div style={styles.scoreBar}>
+    <div style={styles.scoreBar} title={SCORE_BAR_TIPS[label]}>
       <span style={styles.scoreBarLabel}>{label}</span>
       <div style={styles.scoreBarTrack}>
         <div style={{ ...styles.scoreBarFill, width: `${pct}%` }} />
@@ -31,15 +37,24 @@ function CeltCard({ setup }) {
         <div style={styles.cardLeft}>
           <span style={styles.symbol}>{setup.symbol}</span>
           <span style={styles.price}>${setup.stock_price?.toFixed(2)}</span>
-          <span style={{ ...styles.drawdownBadge, color: setup.drawdown_pct >= 30 ? '#ff4444' : '#ffaa00' }}>
+          <span
+            title="Drawdown from 52-week high. Red = ≥30% crash, yellow = 10–30% correction."
+            style={{ ...styles.drawdownBadge, color: setup.drawdown_pct >= 30 ? '#ff4444' : '#ffaa00' }}
+          >
             ↓{setup.drawdown_pct?.toFixed(0)}%
           </span>
         </div>
         <div style={styles.cardRight}>
-          <span style={{ ...styles.totalScore, color: totalColor }}>
+          <span
+            title="Total signal score (max 3.2) = Price Damage + HV Elevation + Sentiment. ≥2.2 qualifies, ≥2.8 = high conviction."
+            style={{ ...styles.totalScore, color: totalColor }}
+          >
             {setup.signal_score?.toFixed(2)}
           </span>
-          <span style={{ ...styles.confidenceBadge, color: confidenceColor, borderColor: confidenceColor }}>
+          <span
+            title="Confidence estimate based on signal score strength. 75%+ = strong setup."
+            style={{ ...styles.confidenceBadge, color: confidenceColor, borderColor: confidenceColor }}
+          >
             {setup.confidence}%
           </span>
           <span style={styles.expandToggle}>{expanded ? '▲' : '▼'}</span>
@@ -55,13 +70,13 @@ function CeltCard({ setup }) {
 
       {/* LEAP summary row */}
       <div style={styles.leapRow}>
-        <span style={styles.leapLabel}>LEAP</span>
-        <span style={styles.leapStrike}>${setup.leap_strike?.toFixed(0)}</span>
-        <span style={styles.leapExpiry}>{expiryStr}</span>
-        <span style={{ ...styles.leapMeta, color: '#aaa' }}>Δ{setup.leap_delta?.toFixed(2)}</span>
-        <span style={styles.leapMeta}>{setup.leap_dte}d</span>
-        <span style={{ ...styles.leapMeta, color: '#00ffaa' }}>${setup.leap_ask?.toFixed(2)} ask</span>
-        <span style={{ ...styles.leapMeta, color: '#555' }}>OI {setup.leap_oi?.toLocaleString()}</span>
+        <span style={styles.leapLabel} title="Long-term Equity AnticiPation Security — a deep-in-the-money call option expiring 270+ days out. Behaves like owning the stock at a fraction of the cost.">LEAP</span>
+        <span style={styles.leapStrike} title="Strike price of the call option. Deep-ITM strikes (below current stock price) give high delta — the option moves nearly dollar-for-dollar with the stock.">${setup.leap_strike?.toFixed(0)}</span>
+        <span style={styles.leapExpiry} title="Expiration date. Longer expiry = more time for the stock to recover.">{expiryStr}</span>
+        <span style={{ ...styles.leapMeta, color: '#aaa' }} title="Delta: how much the option price moves per $1 move in the stock. 0.67 means the option gains ~$0.67 for every $1 the stock rises. Target range: 0.65–0.85.">Δ{setup.leap_delta?.toFixed(2)}</span>
+        <span style={styles.leapMeta} title="Days to expiration — time remaining before the option expires.">{setup.leap_dte}d</span>
+        <span style={{ ...styles.leapMeta, color: '#00ffaa' }} title="Ask price per share. Cost per contract = ask × 100. This is what you pay to enter the trade.">${setup.leap_ask?.toFixed(2)} ask</span>
+        <span style={{ ...styles.leapMeta, color: '#555' }} title="Open Interest: number of outstanding contracts for this strike/expiry. Higher OI = more liquid, easier to enter and exit.">OI {setup.leap_oi?.toLocaleString()}</span>
       </div>
 
       {/* Expanded detail */}
@@ -69,49 +84,49 @@ function CeltCard({ setup }) {
         <div style={styles.detail}>
           <div style={styles.detailGrid}>
             <div style={styles.detailItem}>
-              <span style={styles.detailLabel}>IV RANK</span>
+              <span style={styles.detailLabel} title="IV Rank (0–100): where today's implied volatility sits relative to the past year. Low = options are cheap. The CELT strategy buys when IV rank is high (fear peak) because that fear eventually reverts — and deep-ITM LEAPs are less sensitive to IV than OTM options.">IV RANK</span>
               <span style={{ ...styles.detailVal, color: setup.iv_rank >= 70 ? '#ffaa00' : '#aaa' }}>
                 {setup.iv_rank?.toFixed(0)}
               </span>
             </div>
             <div style={styles.detailItem}>
-              <span style={styles.detailLabel}>HV30</span>
+              <span style={styles.detailLabel} title="30-day Historical Volatility: the actual realized volatility of the stock over the past 30 trading days, annualized. High HV30 means the stock has been moving violently.">HV30</span>
               <span style={styles.detailVal}>{(setup.hv30 * 100)?.toFixed(1)}%</span>
             </div>
             <div style={styles.detailItem}>
-              <span style={styles.detailLabel}>HV60</span>
+              <span style={styles.detailLabel} title="60-day Historical Volatility: same as HV30 but over 60 days. Compares short-term vs medium-term volatility to detect if the spike is recent.">HV60</span>
               <span style={styles.detailVal}>{(setup.hv60 * 100)?.toFixed(1)}%</span>
             </div>
             <div style={styles.detailItem}>
-              <span style={styles.detailLabel}>HV RATIO</span>
+              <span style={styles.detailLabel} title="HV Ratio = HV30 ÷ 1-year average HV. 2.0× means current volatility is twice the normal level — a sign of panic selling. Signal requires ≥1.5×; ≥2.0× = full score.">HV RATIO</span>
               <span style={{ ...styles.detailVal, color: setup.hv_ratio >= 2.0 ? '#00ffaa' : '#aaa' }}>
                 {setup.hv_ratio?.toFixed(2)}×
               </span>
             </div>
             <div style={styles.detailItem}>
-              <span style={styles.detailLabel}>HV EXPANSION</span>
+              <span style={styles.detailLabel} title="HV Expansion = HV30 ÷ HV60. >1 means volatility is accelerating — the recent 30 days are worse than the past 60. ≥1.5× adds a bonus to the HV score.">HV EXPANSION</span>
               <span style={styles.detailVal}>{setup.hv_expansion?.toFixed(2)}×</span>
             </div>
             <div style={styles.detailItem}>
-              <span style={styles.detailLabel}>P/C OI RATIO</span>
+              <span style={styles.detailLabel} title="Put/Call Open Interest Ratio for LEAP contracts (270+ DTE). High ratio means more investors are buying downside protection (puts) than upside calls — a sentiment extreme that often coincides with a bottom.">P/C OI RATIO</span>
               <span style={styles.detailVal}>{setup.leap_put_call_oi_ratio?.toFixed(2)}</span>
             </div>
             <div style={styles.detailItem}>
-              <span style={styles.detailLabel}>200 SMA</span>
+              <span style={styles.detailLabel} title="Distance from the 200-day Simple Moving Average. Negative (red) = stock is below its long-term trend line — a classic crash indicator that adds to the Price Damage score.">200 SMA</span>
               <span style={{ ...styles.detailVal, color: setup.below_200sma ? '#ff4444' : '#666' }}>
                 {setup.pct_from_200sma > 0 ? '+' : ''}{setup.pct_from_200sma?.toFixed(1)}%
               </span>
             </div>
             <div style={styles.detailItem}>
-              <span style={styles.detailLabel}>LEAP IV</span>
+              <span style={styles.detailLabel} title="Implied Volatility of the specific LEAP contract. Lower than HV30 is ideal — you're paying less IV than the stock is actually moving.">LEAP IV</span>
               <span style={styles.detailVal}>{(setup.leap_iv * 100)?.toFixed(1)}%</span>
             </div>
             <div style={styles.detailItem}>
-              <span style={styles.detailLabel}>LEAP BID</span>
+              <span style={styles.detailLabel} title="Bid price: the highest price a buyer will pay. The real fill is usually between bid and ask (the mid).">LEAP BID</span>
               <span style={styles.detailVal}>${setup.leap_bid?.toFixed(2)}</span>
             </div>
             <div style={styles.detailItem}>
-              <span style={styles.detailLabel}>LEAP MID</span>
+              <span style={styles.detailLabel} title="Mid price = (bid + ask) ÷ 2. A fair estimate of what you'd pay with a limit order. Multiply by 100 for total contract cost.">LEAP MID</span>
               <span style={styles.detailVal}>${setup.leap_mid?.toFixed(2)}</span>
             </div>
           </div>
@@ -252,7 +267,7 @@ export default function CeltSetups() {
 
       <div style={styles.filterBar}>
         <div style={styles.filterGroup}>
-          <span style={styles.filterLabel} title="Minimum total signal score (max 3.2). 2.2 = baseline qualify, 2.8+ = high conviction.">MIN SCORE</span>
+          <span style={styles.filterLabel} title="Minimum total signal score (max 3.2): sum of Price Damage (max 1.0) + HV Elevation (max 1.0) + Sentiment (max 1.2). 2.2 = minimum to show, 2.8+ = high conviction crash entry.">MIN SCORE</span>
           <input
             type="range" min="2.0" max="3.2" step="0.1"
             value={filters.minScore}
@@ -276,10 +291,10 @@ export default function CeltSetups() {
       </div>
 
       <div style={styles.legend}>
-        <span>Score bars: <span style={{ color: '#00ffaa' }}>■</span> Price Damage</span>
-        <span><span style={{ color: '#00ffaa' }}>■</span> HV Elevation</span>
-        <span><span style={{ color: '#00ffaa' }}>■</span> Sentiment</span>
-        <span style={{ color: '#555' }}>Click a card to expand details</span>
+        <span title="How far the stock has fallen from its 52-week high (max 1.0)">Score bars: <span style={{ color: '#00ffaa' }}>■</span> Price Damage</span>
+        <span title="30-day volatility vs 1-year average — elevated HV = panic (max 1.0)"><span style={{ color: '#00ffaa' }}>■</span> HV Elevation</span>
+        <span title="IV rank + LEAP put/call OI skew — measures fear extremes (max 1.2)"><span style={{ color: '#00ffaa' }}>■</span> Sentiment</span>
+        <span style={{ color: '#555' }}>Hover any label for details · Click a card to expand</span>
       </div>
 
       {!loading && setups.length === 0 && scanPhase === 'idle' && (
