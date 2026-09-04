@@ -1,5 +1,8 @@
 """
-FastAPI application — endpoints, scheduler, CORS, rate limiting.
+FastAPI application — endpoints, CORS, rate limiting.
+
+Scans are triggered externally (see .github/workflows/scan.yml), not by an
+in-process scheduler — Render's free tier stops the process when idle.
 """
 import asyncio
 import logging
@@ -10,8 +13,6 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,10 +82,6 @@ _cache: dict = {
     "celt_setups": [],        # list[CeltSetup]
     "celt_timestamp": None,   # datetime
 }
-
-
-def _is_weekday() -> bool:
-    return datetime.now(ET).weekday() < 5
 
 
 async def _run_scan() -> None:
@@ -202,18 +199,8 @@ async def _run_technical_scan() -> None:
         logger.error("Technical scan failed: %s", e)
 
 
-async def scan_all() -> None:
-    """Scheduled scan — skips weekends."""
-    if not _is_weekday():
-        logger.info("Skipping scan — weekend")
-        return
-    await _run_scan()
-
-
 async def refresh_sector_analysis() -> None:
     """Refresh sector ETF data once daily. Does not require Schwab auth."""
-    if not _is_weekday():
-        return
     try:
         logger.info("Refreshing sector analysis")
         sectors = await asyncio.get_event_loop().run_in_executor(
@@ -227,22 +214,19 @@ async def refresh_sector_analysis() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler — 08:00, 09:45, 11:00 AM ET on weekdays
+# Scheduling
 # ---------------------------------------------------------------------------
-scheduler = AsyncIOScheduler(timezone=ET)
-scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=ET))
-scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=9, minute=45, timezone=ET))
-scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=11, minute=0, timezone=ET))
-scheduler.add_job(scan_all, CronTrigger(day_of_week="mon-fri", hour=15, minute=45, timezone=ET))
-scheduler.add_job(refresh_sector_analysis, CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone=ET))
-scheduler.add_job(_run_celt_scan, CronTrigger(day_of_week="mon-fri", hour=16, minute=15, timezone=ET))
+# There is deliberately no in-process scheduler here. This service runs on
+# Render's free tier, which stops the process after ~15 minutes of inactivity;
+# an in-process cron cannot fire while the process is stopped, and a cold start
+# does not back-fill missed jobs. Scans are therefore driven externally by
+# .github/workflows/scan.yml, which calls the /scan* endpoints below on a
+# schedule. The inbound request is what wakes the instance, so the trigger no
+# longer depends on the instance already being awake.
 
 
 @app.on_event("startup")
 async def startup():
-    scheduler.start()
-    logger.info("Scheduler started")
-
     # Load persisted results so cold starts serve last known data
     try:
         opps_raw, opps_ts = load_scan_results("opportunities")
@@ -274,11 +258,6 @@ async def startup():
         logger.warning("Could not load CELT results from Supabase: %s", e)
 
     asyncio.create_task(refresh_sector_analysis())
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    scheduler.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +335,13 @@ async def get_sector_analysis_endpoint(request: Request):
         "sectors": [_serialize(s) for s in _cache["sector_analysis"]],
         "as_of": _cache["sector_timestamp"].isoformat() if _cache["sector_timestamp"] else None,
     })
+
+
+@app.get("/scan-sectors")
+@limiter.limit("3/minute")
+async def trigger_sector_scan(request: Request, background_tasks: BackgroundTasks):
+    background_tasks.add_task(refresh_sector_analysis)
+    return JSONResponse(content={"status": "scanning", "message": "Sector refresh started. Fetch /sector-analysis in ~20s."})
 
 
 @app.get("/technical-setups")

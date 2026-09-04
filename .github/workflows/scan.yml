@@ -1,0 +1,154 @@
+name: Scheduled Scans
+
+# Drives the backend's scans from outside.
+#
+# Why this exists: the backend runs on Render's free tier, which stops the
+# process after ~15 min idle. An in-process scheduler (APScheduler) cannot fire
+# while the process is stopped, and a cold start does not back-fill missed jobs,
+# so scans only ran when somebody happened to load the site. Here the inbound
+# request is what wakes the instance, so the trigger no longer depends on the
+# instance already being awake.
+#
+# DST: GitHub cron is UTC-only, so every ET slot is listed twice — once for EDT
+# (UTC-4) and once for EST (UTC-5). Only one is correct on any given date. The
+# "Resolve slot" step below keys off github.event.schedule (the cron expression
+# that actually fired), looks up that cron's intended ET time, and skips the run
+# if the real ET clock disagrees — which is exactly what happens to the
+# out-of-season half of each pair.
+
+on:
+  schedule:
+    # --- 08:00 ET — pre-market scan
+    - cron: '0 12 * * 1-5'    # EDT
+    - cron: '0 13 * * 1-5'    # EST
+    # --- 09:45 ET — sector refresh, then scan
+    - cron: '45 13 * * 1-5'   # EDT
+    - cron: '45 14 * * 1-5'   # EST
+    # --- 10:30 ET — technical setups
+    - cron: '30 14 * * 1-5'   # EDT
+    - cron: '30 15 * * 1-5'   # EST
+    # --- 11:00 ET — scan
+    - cron: '0 15 * * 1-5'    # EDT
+    - cron: '0 16 * * 1-5'    # EST
+    # --- 15:45 ET — scan
+    - cron: '45 19 * * 1-5'   # EDT
+    - cron: '45 20 * * 1-5'   # EST
+    # --- 16:15 ET — CELT scan
+    - cron: '15 20 * * 1-5'   # EDT
+    - cron: '15 21 * * 1-5'   # EST
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: 'Space-separated: scan technical celt sectors'
+        required: false
+        default: 'scan'
+        type: string
+
+concurrency:
+  group: scheduled-scans
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve slot
+        id: slot
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          DISPATCH_JOBS: ${{ github.event.inputs.jobs }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SCHEDULE:-}" ]; then
+            echo "Manual dispatch — running: ${DISPATCH_JOBS}"
+            echo "jobs=${DISPATCH_JOBS}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # cron expression -> intended ET slot + work to do
+          case "$SCHEDULE" in
+            '0 12 * * 1-5'|'0 13 * * 1-5')   want="08:00"; jobs="scan" ;;
+            '45 13 * * 1-5'|'45 14 * * 1-5') want="09:45"; jobs="sectors scan" ;;
+            '30 14 * * 1-5'|'30 15 * * 1-5') want="10:30"; jobs="technical" ;;
+            '0 15 * * 1-5'|'0 16 * * 1-5')   want="11:00"; jobs="scan" ;;
+            '45 19 * * 1-5'|'45 20 * * 1-5') want="15:45"; jobs="scan" ;;
+            '15 20 * * 1-5'|'15 21 * * 1-5') want="16:15"; jobs="celt" ;;
+            *) echo "::error::Unmapped cron '$SCHEDULE' — add it to the case block."; exit 1 ;;
+          esac
+
+          now_min=$(( 10#$(TZ=America/New_York date +%H) * 60 + 10#$(TZ=America/New_York date +%M) ))
+          want_min=$(( 10#${want%%:*} * 60 + 10#${want##*:} ))
+          drift=$(( now_min - want_min )); [ "$drift" -lt 0 ] && drift=$(( -drift ))
+
+          echo "cron='$SCHEDULE' intended=$want ET now=$(TZ=America/New_York date '+%H:%M %Z') drift=${drift}min"
+
+          # 30 min absorbs GitHub's usual cron lag; the wrong-season twin of each
+          # pair lands a full hour out and is skipped here.
+          if [ "$drift" -gt 30 ]; then
+            echo "Off-season or excessively delayed — skipping."
+            echo "jobs=" >> "$GITHUB_OUTPUT"
+          else
+            echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wake backend
+        if: steps.slot.outputs.jobs != ''
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${BACKEND_URL%/}/health" || true)
+            if [ "$code" = "200" ]; then
+              echo "Backend awake after ${i} attempt(s)."
+              exit 0
+            fi
+            echo "Attempt ${i}: HTTP ${code:-none} — cold start in progress, retrying in 15s."
+            sleep 15
+          done
+          echo "::error::Backend did not return 200 from /health after ~3 minutes."
+          exit 1
+
+      - name: Trigger scans
+        if: steps.slot.outputs.jobs != ''
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          JOBS: ${{ steps.slot.outputs.jobs }}
+        run: |
+          set -euo pipefail
+          for job in $JOBS; do
+            case "$job" in
+              scan)      path="/scan" ;;
+              technical) path="/scan-setups" ;;
+              celt)      path="/scan-celt" ;;
+              sectors)   path="/scan-sectors" ;;
+              *) echo "::error::Unknown job '$job'"; exit 1 ;;
+            esac
+
+            echo "--- $job -> $path"
+            body=$(curl -s -w '\n%{http_code}' --max-time 60 "${BACKEND_URL%/}${path}")
+            code=$(printf '%s' "$body" | tail -n1)
+            printf '%s\n' "$body" | sed '$d'
+
+            if [ "$code" != "200" ]; then
+              echo "::error::$path returned HTTP $code"
+              exit 1
+            fi
+
+            # Scans run as FastAPI background tasks, so the 200 only means
+            # "accepted". Space them out so a slow scan is not competing with
+            # the next trigger for Schwab's 120 req/min budget.
+            sleep 20
+          done
+
+      - name: Report scan freshness
+        if: steps.slot.outputs.jobs != ''
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          set -euo pipefail
+          # Give the background task room to finish before reading /health.
+          sleep 120
+          curl -s --max-time 30 "${BACKEND_URL%/}/health" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({k: d.get(k) for k in ("last_scan","data_age_seconds","token_age_days","celt_last_scan")}, indent=2))'

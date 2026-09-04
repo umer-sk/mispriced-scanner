@@ -17,3 +17,9 @@ services:
         value: /etc/secrets/token.json
       - key: ALLOWED_ORIGIN
         sync: false
+      # Without these two, supabase_client._get_client() returns None and every
+      # save/load silently no-ops — cold starts then serve an empty cache.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false

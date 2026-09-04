@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Does
 
-A QQQ options scanner that detects mispriced options contracts across the 30 largest QQQ holdings. It runs automated scans at 8AM, 9:45AM, and 11AM ET on weekdays, and serves a React dashboard showing trade setups with risk/reward profiles.
+A QQQ options scanner that detects mispriced options contracts across the 30 largest QQQ holdings. It runs automated scans on weekdays (08:00, 09:45, 11:00, 15:45 ET, plus technical at 10:30 and CELT at 16:15), and serves a React dashboard showing trade setups with risk/reward profiles.
 
 ## Development Commands
 
@@ -29,7 +29,7 @@ npm run preview   # Preview production build
 
 ### Backend (`backend/`)
 
-- **`main.py`** — FastAPI app with 3 endpoints + APScheduler (3 daily scans)
+- **`main.py`** — FastAPI app, endpoints + in-memory cache. **No in-process scheduler** — see Scheduling below.
 - **`scanner.py`** — 5 mispricing detectors + spread constructor + P&L calculator (~600 lines, core logic)
 - **`schwab_client.py`** — OAuth + option chain fetching + IV calculation via schwab-py SDK
 - **`models.py`** — Dataclasses: `OptionContract`, `OptionChainData`, `TradeSetup`, `MispricingSignal`, `MarketContext`
@@ -54,7 +54,7 @@ npm run preview   # Preview production build
 
 ### Data Flow
 
-1. APScheduler triggers `scan_all()` at scheduled times
+1. GitHub Actions (`.github/workflows/scan.yml`) calls `GET /scan` → `_run_scan()`
 2. `fetch_option_chain()` → Schwab API → `OptionChainData`
 3. `get_catalyst_context()` → earnings detection, IV trend, narrative
 4. `run_all_detectors()` → 5 detectors produce `MispricingSignal`
@@ -65,6 +65,29 @@ npm run preview   # Preview production build
 
 `iv_rank`, `skew`, `parity` (put-call), `term` (backwardation), `move` (straddle vs HV)
 
+### Scheduling
+
+Scans are driven by **GitHub Actions**, not by an in-process scheduler. Render's
+free tier stops the process after ~15 min idle; APScheduler could not fire while
+stopped, and a cold start does not back-fill missed jobs — so unattended scans
+silently never ran. `.github/workflows/scan.yml` now calls the trigger endpoints
+on a cron, and the inbound request is what wakes the instance.
+
+| ET slot | Endpoint | Work |
+|---|---|---|
+| 08:00 | `/scan` | Full scan |
+| 09:45 | `/scan-sectors`, `/scan` | Sector refresh, then full scan |
+| 10:30 | `/scan-setups` | Technical setups |
+| 11:00 | `/scan` | Full scan |
+| 15:45 | `/scan` | Full scan |
+| 16:15 | `/scan-celt` | CELT scan |
+
+GitHub cron is UTC-only, so each slot has two cron entries (EDT and EST). The
+workflow keys off `github.event.schedule` to look up the intended ET time and
+skips the out-of-season twin. Tolerates up to 30 min of cron lag.
+
+Manual run: repo → Actions → Scheduled Scans → Run workflow.
+
 ## Environment Variables
 
 **Backend `.env`:**
@@ -74,7 +97,15 @@ SCHWAB_APP_SECRET=
 SCHWAB_CALLBACK_URL=https://127.0.0.1
 SCHWAB_TOKEN_PATH=./token.json
 ALLOWED_ORIGIN=http://localhost:5173
+SUPABASE_URL=          # required in prod — see below
+SUPABASE_KEY=
 ```
+
+`SUPABASE_URL`/`SUPABASE_KEY` are optional locally but **required in
+production**. `supabase_client._get_client()` returns `None` when they are
+unset and every save/load silently no-ops, so nothing persists and each cold
+start serves an empty cache. `last_scan: null` on `/health` right after a
+restart is the symptom.
 
 **Frontend `.env.local`:**
 ```
