@@ -145,10 +145,10 @@ async def _run_scan() -> None:
         }
 
         _cache["opportunities"] = filtered
-        _cache["scan_timestamp"] = datetime.utcnow()
+        _cache["scan_timestamp"] = datetime.now(timezone.utc)
         _cache["symbols_scanned"] = len(QQQ_TOP50)
 
-        save_scan_results("opportunities", [_serialize(s) for s in filtered], datetime.utcnow())
+        save_scan_results("opportunities", [_serialize(s) for s in filtered], datetime.now(timezone.utc))
 
         elapsed = time.monotonic() - t_start
         logger.info(
@@ -170,8 +170,8 @@ async def _run_celt_scan() -> None:
         setups = await loop.run_in_executor(None, scan_celt_setups, QQQ_TOP50)
         if setups:
             _cache["celt_setups"] = setups
-        _cache["celt_timestamp"] = datetime.utcnow()
-        save_scan_results("celt_results", [_serialize(s) for s in setups], datetime.utcnow())
+        _cache["celt_timestamp"] = datetime.now(timezone.utc)
+        save_scan_results("celt_results", [_serialize(s) for s in setups], datetime.now(timezone.utc))
         elapsed = time.monotonic() - t_start
         logger.info("CELT scan complete: %d setups, %.1fs", len(setups), elapsed)
     except Exception as e:
@@ -189,9 +189,9 @@ async def _run_technical_scan() -> None:
         )
         if setups:
             _cache["technical_setups"] = setups
-        _cache["technical_timestamp"] = datetime.utcnow()
+        _cache["technical_timestamp"] = datetime.now(timezone.utc)
         _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
-        save_scan_results("technical_setups", [_serialize(s) for s in _cache["technical_setups"]], datetime.utcnow())
+        save_scan_results("technical_setups", [_serialize(s) for s in _cache["technical_setups"]], datetime.now(timezone.utc))
         elapsed = time.monotonic() - t_start
         logger.info("Technical scan complete: %d setups (cache has %d), %.1fs",
                     len(setups), len(_cache["technical_setups"]), elapsed)
@@ -207,7 +207,7 @@ async def refresh_sector_analysis() -> None:
             None, get_sector_analysis
         )
         _cache["sector_analysis"] = sectors
-        _cache["sector_timestamp"] = datetime.utcnow()
+        _cache["sector_timestamp"] = datetime.now(timezone.utc)
         logger.info("Sector analysis updated: %d sectors", len(sectors))
     except Exception as e:
         logger.exception("Sector analysis refresh failed: %s", e)

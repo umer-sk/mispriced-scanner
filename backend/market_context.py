@@ -3,7 +3,7 @@ Market context: VIX regime assessment, skip recommendation, token expiry check.
 """
 import logging
 import os
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -18,7 +18,11 @@ ET = ZoneInfo("America/New_York")
 # In-process QQQ IV history: date -> iv30
 _qqq_iv_history: dict[date, float] = {}
 
-SCAN_TIMES_ET = ["08:00", "09:45", "11:00"]
+# Full-scan slots that refresh /opportunities. Must stay in sync with the
+# cron entries in .github/workflows/scan.yml (which also runs the technical
+# scan at 10:30 and the CELT scan at 16:15 — neither refreshes /opportunities,
+# so they are deliberately not listed here).
+SCAN_TIMES_ET = ["08:00", "09:45", "11:00", "15:45"]
 
 
 def _is_market_open() -> bool:
@@ -32,17 +36,15 @@ def _is_market_open() -> bool:
 
 def _next_scan_time() -> Optional[str]:
     now_et = datetime.now(ET)
-    today_str = now_et.strftime("%Y-%m-%d")
     for t in SCAN_TIMES_ET:
         h, m = map(int, t.split(":"))
         candidate = now_et.replace(hour=h, minute=m, second=0, microsecond=0)
         if candidate > now_et and now_et.weekday() < 5:
-            return f"{t} AM ET"
-    # Next business day at 8:00 AM
-    days_ahead = 1
-    while (now_et + timedelta(days=days_ahead)).weekday() >= 5:
-        days_ahead += 1
-    return f"Tomorrow 08:00 AM ET"
+            # 12-hour clock: "AM" was hardcoded, so the afternoon slot rendered
+            # as the nonsensical "15:45 AM ET".
+            return f"{candidate.strftime('%I:%M %p').lstrip('0')} ET"
+    # Next business day at the first slot
+    return f"Tomorrow {SCAN_TIMES_ET[0]} AM ET"
 
 
 def _get_qqq_iv_trend(current_iv: float) -> str:
@@ -71,7 +73,11 @@ def _token_age_days() -> float:
     if not os.path.exists(token_path):
         return 999.0
     mtime = os.path.getmtime(token_path)
-    return (datetime.utcnow().timestamp() - mtime) / 86400
+    # getmtime returns a POSIX timestamp, so compare against one. Note
+    # datetime.utcnow().timestamp() would be wrong here: .timestamp() reads a
+    # naive datetime as local time, so on a non-UTC host it skewed token age by
+    # the UTC offset.
+    return (datetime.now(timezone.utc).timestamp() - mtime) / 86400
 
 
 _mas_cache: dict = {}
@@ -82,7 +88,7 @@ _MAS_TTL_SECONDS = 3600  # refresh at most once per hour
 def _fetch_index_mas() -> dict:
     """Fetch SPY and QQQ price + 7EMA / 20MA / 50MA via yfinance. Cached for 1 hour."""
     global _mas_cache, _mas_cache_time
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if _mas_cache_time and (now - _mas_cache_time).total_seconds() < _MAS_TTL_SECONDS:
         return _mas_cache
     try:
@@ -110,7 +116,7 @@ def get_market_context(qqq_chain: Optional[OptionChainData] = None) -> MarketCon
     Assess overall market conditions and generate skip recommendation.
     Uses QQQ IV30 as VIX proxy.
     """
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
     market_open = _is_market_open()
     next_scan = _next_scan_time()
     mas = _fetch_index_mas()

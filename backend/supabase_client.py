@@ -4,7 +4,7 @@ Gracefully no-ops if SUPABASE_URL / SUPABASE_KEY are not set (local dev).
 """
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from supabase import create_client, Client
 
@@ -32,7 +32,7 @@ def save_scan_results(cache_key: str, results: list[dict], timestamp: datetime) 
             "cache_key": cache_key,
             "scan_timestamp": timestamp.isoformat(),
             "data": results,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }).execute()
         logger.info("Saved %d results to Supabase (%s)", len(results), cache_key)
     except Exception as e:

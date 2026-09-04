@@ -3,7 +3,7 @@
 """
 import logging
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -851,7 +851,7 @@ def construct_best_spread(
         scenarios_10d=scenarios_10d,
         scenarios_expiry=scenarios_expiry,
         score=0,  # filled by caller
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
         order_string=order_string,
     )
 
@@ -1013,7 +1013,7 @@ def construct_bear_put_spread(
         liquidity_ok=liquidity_ok,
         scenarios_5d=scenarios_5d, scenarios_10d=scenarios_10d,
         scenarios_expiry=scenarios_expiry,
-        score=0, timestamp=datetime.utcnow(), order_string=order_string,
+        score=0, timestamp=datetime.now(timezone.utc), order_string=order_string,
     )
 
 
