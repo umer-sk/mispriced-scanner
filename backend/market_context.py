@@ -1,6 +1,7 @@
 """
 Market context: VIX regime assessment, skip recommendation, token expiry check.
 """
+import json
 import logging
 import os
 from datetime import datetime, timedelta, date, timezone
@@ -69,15 +70,38 @@ def _get_qqq_iv_trend(current_iv: float) -> str:
 
 
 def _token_age_days() -> float:
+    """Days since the Schwab token was first created.
+
+    Reads `creation_timestamp` from inside the token file rather than the
+    file's mtime. On Render the token is a mounted secret whose mtime is set
+    when the secret is mounted — i.e. at deploy time — so an mtime-based age
+    measured "time since last deploy" and silently reset to zero on every
+    deploy, exactly when it was most needed. schwab-py preserves
+    `creation_timestamp` across token refreshes (see TokenMetadata in
+    schwab/auth.py), so it tracks the real 7-day refresh-token clock.
+
+    Returns 999.0 when the token is missing or unreadable, so callers treat an
+    unknown token as expired rather than as fresh.
+    """
     token_path = os.environ.get("SCHWAB_TOKEN_PATH", "./token.json")
     if not os.path.exists(token_path):
         return 999.0
-    mtime = os.path.getmtime(token_path)
-    # getmtime returns a POSIX timestamp, so compare against one. Note
-    # datetime.utcnow().timestamp() would be wrong here: .timestamp() reads a
-    # naive datetime as local time, so on a non-UTC host it skewed token age by
-    # the UTC offset.
-    return (datetime.now(timezone.utc).timestamp() - mtime) / 86400
+
+    try:
+        with open(token_path) as f:
+            created = json.load(f)["creation_timestamp"]
+        # Compare POSIX timestamp to POSIX timestamp. Note that
+        # datetime.utcnow().timestamp() would be wrong here: .timestamp()
+        # reads a naive datetime as local time, skewing the result by the
+        # host's UTC offset.
+        return (datetime.now(timezone.utc).timestamp() - float(created)) / 86400
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        logger.warning(
+            "Could not read creation_timestamp from %s (%s) — reporting token "
+            "as expired so this surfaces rather than reading falsely fresh.",
+            token_path, e,
+        )
+        return 999.0
 
 
 _mas_cache: dict = {}
