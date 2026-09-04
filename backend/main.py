@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -268,7 +268,13 @@ def _data_age_seconds() -> int:
     ts = _cache.get("scan_timestamp")
     if ts is None:
         return -1
-    return int((datetime.utcnow() - ts).total_seconds())
+    # scan_timestamp arrives from two sources with different tz-awareness: an
+    # in-process scan stores a naive UTC datetime, while a Supabase restore
+    # returns an aware one (the column is timestamptz). Subtracting one from
+    # the other raises TypeError, so normalise both to aware UTC first.
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return int((datetime.now(timezone.utc) - ts).total_seconds())
 
 
 def _serialize(obj):
