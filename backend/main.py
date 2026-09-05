@@ -557,6 +557,27 @@ async def get_celt_setups(
     })
 
 
+@app.get("/forward-test")
+@limiter.limit("20/minute")
+async def get_forward_test(request: Request):
+    import ft_store
+    from forward_test import aggregate
+    return JSONResponse(content=aggregate(ft_store.fetch_all_positions()))
+
+
+@app.get("/forward-test/positions")
+@limiter.limit("20/minute")
+async def get_forward_test_positions(
+    request: Request,
+    status: Optional[str] = None,
+    tier: Optional[str] = None,
+):
+    import ft_store
+    return JSONResponse(content={
+        "positions": ft_store.fetch_all_positions(status=status, tier=tier),
+    })
+
+
 @app.get("/scan-celt")
 @limiter.limit("3/minute")
 async def trigger_celt_scan(request: Request, background_tasks: BackgroundTasks):

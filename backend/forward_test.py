@@ -361,3 +361,45 @@ def mark_open_positions(now: datetime | None = None) -> int:
     except Exception as e:
         logger.exception("forward test: mark_open_positions failed: %s", e)
         return 0
+
+
+def _stats(rows: list[dict]) -> dict:
+    n = len(rows)
+    if n == 0:
+        return {"n": 0, "win_rate": 0.0, "avg_pnl": 0.0, "avg_mfe": 0.0, "avg_mae": 0.0}
+    pnls = [r["realized_pnl_pct"] for r in rows]
+    wins = sum(1 for p in pnls if p > 0)          # breakeven is not a win
+    return {
+        "n": n,
+        "win_rate": round(wins / n * 100, 1),
+        "avg_pnl": round(sum(pnls) / n, 1),
+        "avg_mfe": round(sum((r.get("mfe_pct") or 0.0) for r in rows) / n, 1),
+        "avg_mae": round(sum((r.get("mae_pct") or 0.0) for r in rows) / n, 1),
+    }
+
+
+def aggregate(positions: list[dict]) -> dict:
+    """Summarise closed positions. Open ones are counted, never averaged in —
+    including them would quietly dilute every number."""
+    closed = [p for p in positions
+              if p.get("status") in {"target1", "target2", "stopped", "expired"}
+              and p.get("realized_pnl_pct") is not None]
+    open_count = sum(1 for p in positions if p.get("status") in {"open", "target1"}
+                     and p.get("realized_pnl_pct") is None)
+    unpriceable = sum(1 for p in positions if p.get("status") == "unpriceable")
+
+    def group(key):
+        out: dict[str, list[dict]] = {}
+        for p in closed:
+            out.setdefault(str(p.get(key) or "—"), []).append(p)
+        return {k: _stats(v) for k, v in sorted(out.items())}
+
+    return {
+        "overall": _stats(closed),
+        "by_tier": group("tier"),
+        "by_detector": group("detector"),
+        "by_source": group("source"),
+        "closed_count": len(closed),
+        "open_count": open_count,
+        "unpriceable_count": unpriceable,
+    }
