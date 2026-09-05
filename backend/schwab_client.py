@@ -386,3 +386,53 @@ async def fetch_all_chains(tickers: list[str]) -> list[OptionChainData]:
             await asyncio.sleep(max(0.0, _BATCH_MIN_SECONDS - elapsed))
 
     return results
+
+
+def _looks_like_occ_symbol(symbol: str) -> bool:
+    """Cheap shape check before spending a quote slot on it.
+
+    An OCC symbol is a fixed 21 characters: 6-char root, YYMMDD, 'C'/'P' at
+    index 12, then an 8-digit strike (see occ.py). Schwab's `symbol` field is
+    otherwise trusted verbatim; a malformed value here would waste a slot in
+    the batch and could in principle collide with something unintended.
+    """
+    return (
+        isinstance(symbol, str)
+        and len(symbol) == 21
+        and symbol[12] in ("C", "P")
+    )
+
+
+def fetch_quotes(symbols: list[str]) -> dict[str, float]:
+    """Quote specific contracts by OCC symbol; returns {symbol: mid}.
+
+    Used to re-price tracked positions without re-fetching chains — chains are
+    ATM-centred (strike_count=20), so a position that moved deep ITM or OTM
+    would simply fall out of one.
+    """
+    if not symbols:
+        return {}
+    symbols = [s for s in symbols if _looks_like_occ_symbol(s)]
+    if not symbols:
+        return {}
+    out: dict[str, float] = {}
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.error("fetch_quotes: could not get Schwab client: %s", e)
+        return out
+    # Chunked: Schwab caps symbols per request, and one oversized request
+    # failing would lose every quote rather than one chunk's worth.
+    for i in range(0, len(symbols), 25):
+        chunk = symbols[i:i + 25]
+        try:
+            resp = client.get_quotes(chunk)
+            data = resp.json() if hasattr(resp, "json") else {}
+            for sym, payload in (data or {}).items():
+                q = payload.get("quote") or {}
+                bid, ask = _safe_float(q.get("bidPrice")), _safe_float(q.get("askPrice"))
+                if bid > 0 and ask > 0:
+                    out[sym] = round((bid + ask) / 2, 4)
+        except Exception as e:
+            logger.error("fetch_quotes failed for %d symbols: %s", len(chunk), e)
+    return out

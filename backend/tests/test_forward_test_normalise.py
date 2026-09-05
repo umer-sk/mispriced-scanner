@@ -22,6 +22,7 @@ def _trade_setup(**over):
         long_leg_spread_pct=4.0, short_leg_spread_pct=4.0, liquidity_ok=True,
         scenarios_5d=[], scenarios_10d=[], scenarios_expiry=[], score=70,
         timestamp=datetime.now(timezone.utc), order_string="",
+        long_occ="NVDA  261016C00190000", short_occ="NVDA  261016C00200000",
     )
     kwargs.update(over)
     return TradeSetup(**kwargs)

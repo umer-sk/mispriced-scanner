@@ -7,6 +7,9 @@ See docs/superpowers/specs/2026-09-05-forward-test-design.md.
 import logging
 from datetime import date, datetime, timezone
 
+import ft_store
+from schwab_client import fetch_quotes
+
 logger = logging.getLogger(__name__)
 
 # Exit rules, as a percentage of entry debit measured on spread mid.
@@ -230,3 +233,126 @@ def realized_pnl(position: dict, final_pnl: float | None) -> float | None:
             return None
         return (TARGET_1_PCT + final_pnl) / 2 if hit_t1 else final_pnl
     return None
+
+
+def snapshot_setups(setups: list, source: str) -> int:
+    """Record newly-seen setups. Returns the count of new positions.
+
+    Never raises: a forward-test failure must not fail the scan that called it.
+    """
+    if not setups:
+        return 0
+    try:
+        now = datetime.now(timezone.utc)
+        norms = []
+        for s in setups:
+            try:
+                norms.append(normalise(s, source))
+            except Exception as e:
+                logger.error("forward test: could not normalise a %s setup: %s", source, e)
+
+        # A position with no OCC symbols could never be marked; recording it
+        # would leave a permanent open row that only ever times out.
+        norms = [n for n in norms if n["long_occ"]]
+        if not norms:
+            return 0
+
+        existing = ft_store.find_open_by_dedup([n["dedup_key"] for n in norms])
+        new_count = 0
+
+        for n in norms:
+            prior = existing.get(n["dedup_key"])
+            if prior:
+                # Entry price and timestamp are deliberately untouched.
+                ft_store.touch_position(prior["id"], now)
+                continue
+
+            tier, gates_failed = classify(n)
+            row = {
+                "dedup_key": n["dedup_key"], "source": n["source"],
+                "symbol": n["symbol"], "detector": n["detector"],
+                "structure": n["structure"], "direction": n["direction"],
+                "expiry": n["expiry"], "dte_at_entry": n["dte_at_entry"],
+                "long_strike": n["long_strike"], "short_strike": n["short_strike"],
+                "long_occ": n["long_occ"], "short_occ": n["short_occ"],
+                "entry_ts": now, "entry_debit": n["entry_debit"],
+                "entry_stock_price": n["entry_stock_price"],
+                "score_at_entry": n["quality"], "rr_at_entry": n["rr_ratio"],
+                "breakeven_move_pct": n["breakeven_move_pct"],
+                "tier": tier, "gates_failed": gates_failed,
+                "status": "open", "times_seen": 1, "last_seen_ts": now,
+            }
+            if ft_store.insert_position(row):
+                new_count += 1
+
+        logger.info("forward test: %d new positions from %d %s setups",
+                    new_count, len(norms), source)
+        return new_count
+    except Exception as e:
+        logger.exception("forward test: snapshot_setups failed: %s", e)
+        return 0
+
+
+def mark_open_positions(now: datetime | None = None) -> int:
+    """Re-price every open position and advance its state. Never raises."""
+    try:
+        now = now or datetime.now(timezone.utc)
+        today = now.date()
+        positions = ft_store.list_open_positions()
+        if not positions:
+            return 0
+
+        symbols = sorted({
+            occ for p in positions
+            for occ in (p.get("long_occ"), p.get("short_occ")) if occ
+        })
+        quotes = fetch_quotes(symbols)
+
+        marked = 0
+        for p in positions:
+            long_mid = quotes.get(p.get("long_occ"))
+            short_occ = p.get("short_occ") or ""
+            short_mid = quotes.get(short_occ) if short_occ else 0.0
+
+            if long_mid is None or (short_occ and short_mid is None):
+                # A missing quote is not a price of zero. Count the failure and
+                # leave the position open.
+                failures = (p.get("mark_failures") or 0) + 1
+                if failures >= MAX_MARK_FAILURES:
+                    ft_store.update_position(p["id"], {
+                        "mark_failures": failures, "status": "unpriceable",
+                        "closed_ts": now,
+                    })
+                else:
+                    ft_store.update_position(p["id"], {"mark_failures": failures})
+                continue
+
+            spread_mid = round(long_mid - (short_mid or 0.0), 4)
+            pnl = round(pnl_pct(spread_mid, p["entry_debit"]), 2)
+            # stock_price is left null: quoting the underlying would add one
+            # request per distinct symbol for a field nothing currently reads.
+            # The column stays in the schema so it can be backfilled later
+            # without a migration.
+            ft_store.insert_mark(p["id"], now, spread_mid, pnl, None)
+
+            expiry = p["expiry"]
+            if isinstance(expiry, str):
+                expiry = date.fromisoformat(expiry)
+            upd = apply_mark({**p, "expiry": expiry}, pnl, now, today)
+
+            final = upd.pop("last_pnl_pct", None)
+            if upd.get("closed_ts") is not None:
+                upd["realized_pnl_pct"] = realized_pnl({**p, **upd}, final)
+            else:
+                upd.pop("closed_ts", None)
+
+            if p.get("mark_failures"):
+                upd["mark_failures"] = 0
+            ft_store.update_position(p["id"], upd)
+            marked += 1
+
+        logger.info("forward test: marked %d/%d open positions", marked, len(positions))
+        return marked
+    except Exception as e:
+        logger.exception("forward test: mark_open_positions failed: %s", e)
+        return 0
