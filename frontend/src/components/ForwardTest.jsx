@@ -76,6 +76,7 @@ export default function ForwardTest() {
           <StatRow label="ALL" s={stats.overall} />
           {Object.entries(stats.by_tier).map(([k, s]) => <StatRow key={`t${k}`} label={`Tier ${k}`} s={s} />)}
           {Object.entries(stats.by_detector).map(([k, s]) => <StatRow key={`d${k}`} label={k} s={s} />)}
+          {Object.entries(stats.by_source).map(([k, s]) => <StatRow key={`src${k}`} label={k} s={s} />)}
         </tbody>
       </table>
 

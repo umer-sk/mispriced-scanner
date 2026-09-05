@@ -71,6 +71,81 @@ straddle/put (Brenner-Subrahmanyam) and compare it to HV30. Do not compare an
 option *price* ratio against a 1-sigma move — a straddle is ~0.8 sigma and a
 single ATM option ~0.4, so that reads fair value as heavily underpriced.
 
+### Forward Test
+
+Every setup the scanner surfaces (`TradeSetup` from the main scan, `TechnicalSetup`
+from the technical scan) is recorded and marked to market on the existing scan
+ticks until it resolves against fixed exit rules: **+50%** of entry debit (first
+target, half off), **+100%** (second target, remainder off), **−50%** (stop, whole
+position out) — all measured on spread mid. It answers "do these setups make
+money, and which detectors are worth trusting" — something the existing
+`TradeJournal` (localStorage, `qqq_journal`) cannot, because it only records
+trades the user chose to save, so its sample is filtered by the user's own
+judgement.
+
+- **`backend/forward_test.py`** — normalises `TradeSetup`/`TechnicalSetup` onto
+  one shape, classifies each into a tier, runs the outcome state machine, and
+  aggregates closed positions into stats.
+- **`backend/ft_store.py`** — Supabase persistence for two tables, `ft_positions`
+  (one row per tracked setup) and `ft_marks` (one row per re-price). DDL lives in
+  `docs/sql/forward_test.sql` and **must be applied by hand in the Supabase SQL
+  editor** — it has not been applied yet. Until it is, every `ft_store` function
+  hits a missing table, catches the error, and no-ops silently: nothing is
+  recorded and nothing complains.
+- **`backend/occ.py`** — builds OCC option symbols so `fetch_quotes()` can
+  re-price a specific known contract by symbol instead of re-fetching a chain
+  (chains are ATM-centred and a position that has moved deep ITM/OTM can fall
+  out of one).
+
+**Entry points.** `snapshot_setups(setups, source)` and `mark_open_positions()`
+are both called from `_run_scan` (`main.py`), after the `chains_ok` guard so a
+failed scan never records positions, and `mark_open_positions()` alone runs
+after `snapshot_setups(setups, "technical")` inside `_run_technical_scan`. Both
+functions do sequential Supabase/Schwab I/O, so both run via
+`run_in_executor` — off the event loop, like every other blocking call in these
+scan functions — so `/health` and `/opportunities` don't stall and the scan
+lock doesn't hold the loop hostage for other triggers while `_scan_lock` is
+held.
+
+**Tiers.** Each setup is classified A/B/C at log time from seven gates
+(quality, RR, liquidity, no earnings in window, 25–45 DTE, required move,
+trend), but filtering happens at *read* time — everything that clears the
+scanner's own surfacing filter is recorded, tier and all, so near-misses are
+available to check whether the gates are set correctly. Two gates carry the
+real discriminating power and are the only ones with a defined Tier B
+near-miss band:
+- **quality** (`score >= 60` / `signal_count >= 5`) — a quality screen.
+- **breakeven move** (`abs(breakeven_move_pct) <= 3.5`) — the actual probability
+  content; a stock that must move 3.5% just to reach breakeven needs
+  materially more to reach +50%.
+
+Every other gate is pass/fail with no "nearly" — failing one of those alone is
+still Tier C.
+
+**Read the caveats below with every number this feature produces:**
+
+1. **Mid, not fills.** Targets and stops are evaluated on the spread mid; real
+   fills cross the bid/ask. Live trading will underperform these figures, more
+   so on wider spreads.
+2. **Thin sample.** Roughly 1–3 new positions a day. Any per-detector (or
+   per-tier, per-source) row is only meaningful read alongside its `n` —
+   `aggregate()` and the UI both surface `n` for exactly this reason.
+3. **`unpriceable` is not a loss.** A position that fails to get a quote 8
+   marks running is closed as `unpriceable` and excluded from statistics
+   entirely — it counts as neither a win nor a loss.
+
+**Trap for a future maintainer:** `fetch_quotes()` in `schwab_client.py` keys
+its returned dict by whatever symbol string Schwab echoes back in the response
+payload, while `mark_open_positions()` looks up quotes by the symbol it
+requested (`long_occ`/`short_occ`). These are assumed identical. If Schwab ever
+normalizes or reformats the symbol on the way back, every lookup misses,
+`mark_failures` increments on every open position on every tick, and after 8
+ticks the entire dataset quietly closes itself out as `unpriceable` — with no
+exception, no log spike, nothing to point at. `backend/tests/test_fetch_quotes.py`
+(`test_request_response_key_identity`) pins the current identity behavior;
+if that test ever needs to change to accommodate a Schwab response format
+change, `mark_open_positions` needs a corresponding fix, not just the test.
+
 ### Scheduling
 
 Scans are driven by **GitHub Actions**, not by an in-process scheduler. Render's
