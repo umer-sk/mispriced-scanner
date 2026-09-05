@@ -187,12 +187,18 @@ async def _run_scan_inner() -> None:
             )
             return
 
+        # One timestamp for both the cache and the persisted copy. Calling
+        # now() twice made the in-memory and Supabase values differ by
+        # microseconds, so last_scan appeared to CHANGE across a restart — and
+        # the dashboard's scan poller treats any change as "scan finished",
+        # reporting success for a scan that never ran.
+        scan_ts = datetime.now(timezone.utc)
         _cache["opportunities"] = filtered
-        _cache["scan_timestamp"] = datetime.now(timezone.utc)
+        _cache["scan_timestamp"] = scan_ts
         _cache["symbols_scanned"] = len(QQQ_TOP50)
         _cache["last_scan_error"] = None
 
-        save_scan_results("opportunities", [_serialize(s) for s in filtered], datetime.now(timezone.utc))
+        save_scan_results("opportunities", [_serialize(s) for s in filtered], scan_ts)
 
         elapsed = time.monotonic() - t_start
         logger.info(
@@ -226,10 +232,11 @@ async def _run_celt_scan() -> None:
                 # became visible after the next cold start.
                 _record_scan_error("celt", "0 setups — not overwriting cached CELT results")
                 return
+            celt_ts = datetime.now(timezone.utc)
             _cache["celt_setups"] = setups
-            _cache["celt_timestamp"] = datetime.now(timezone.utc)
+            _cache["celt_timestamp"] = celt_ts
             _cache["last_scan_error"] = None
-            save_scan_results("celt_results", [_serialize(s) for s in setups], datetime.now(timezone.utc))
+            save_scan_results("celt_results", [_serialize(s) for s in setups], celt_ts)
             elapsed = time.monotonic() - t_start
             logger.info("CELT scan complete: %d setups, %.1fs", len(setups), elapsed)
         except Exception as e:
@@ -255,10 +262,11 @@ async def _run_technical_scan() -> None:
                 _record_scan_error("technical", "0 setups — not overwriting cached technical setups")
                 return
             _cache["technical_setups"] = setups
-            _cache["technical_timestamp"] = datetime.now(timezone.utc)
+            tech_ts = datetime.now(timezone.utc)
+            _cache["technical_timestamp"] = tech_ts
             _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
             _cache["last_scan_error"] = None
-            save_scan_results("technical_setups", [_serialize(s) for s in setups], datetime.now(timezone.utc))
+            save_scan_results("technical_setups", [_serialize(s) for s in setups], tech_ts)
             elapsed = time.monotonic() - t_start
             logger.info("Technical scan complete: %d setups, %.1fs", len(setups), elapsed)
         except Exception as e:
