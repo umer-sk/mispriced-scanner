@@ -6,11 +6,18 @@ See docs/superpowers/specs/2026-09-05-forward-test-design.md.
 """
 import logging
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import ft_store
 from schwab_client import fetch_quotes
 
 logger = logging.getLogger(__name__)
+
+# Expiry is a market-calendar fact, so the "is it past expiry" comparison must
+# be made on the exchange's date. A UTC date rolls over at 19:00/20:00 ET, so a
+# manual scan late in the evening would otherwise see tomorrow and expire a
+# position a day early.
+ET = ZoneInfo("America/New_York")
 
 # Exit rules, as a percentage of entry debit measured on spread mid.
 TARGET_1_PCT = 50.0
@@ -116,6 +123,11 @@ def normalise(setup, source: str) -> dict:
     else:
         raise ValueError(f"unknown source {source!r}")
 
+    # net_debit / premium is the worst-case fill; every mark is mid-to-mid.
+    # Carrying the entry mid makes a like-for-like series recoverable later.
+    # None where the setup has no mid — never a guessed value.
+    entry_mid = getattr(setup, "entry_mid", None)
+
     short_strike = setup.short_strike
     dedup_key = "|".join([
         setup.symbol,
@@ -140,6 +152,7 @@ def normalise(setup, source: str) -> dict:
         "long_occ": long_occ,
         "short_occ": short_occ,
         "entry_debit": float(entry_debit),
+        "entry_mid": float(entry_mid) if entry_mid is not None else None,
         "entry_stock_price": float(setup.stock_price),
         "quality": quality,
         "rr_ratio": float(setup.rr_ratio),
@@ -153,6 +166,19 @@ def normalise(setup, source: str) -> dict:
 
 
 MAX_MARK_FAILURES = 8
+
+
+def _as_date(value) -> date | None:
+    """Coerce a stored expiry to a `date`. Supabase `date` columns round-trip
+    as ISO strings, so both forms reach here."""
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
 
 
 def pnl_pct(spread_mid: float, entry_debit: float) -> float:
@@ -176,10 +202,11 @@ def apply_mark(position: dict, pnl: float, now: datetime, today: date) -> dict:
       the position stays open on this mark — callers must not blindly write
       that `None` over an existing `closed_ts` already stored for the
       position; only a mark that actually closes the position sets it.
-    - `last_pnl_pct` is transport-only: it reports this mark's P&L to the
-      caller (e.g. as the final mark on an expiring position) but is not a
-      column in `ft_positions` and must be popped from the dict before any
-      database write.
+    - `last_pnl_pct` is transport-only *in this dict*: it reports this mark's
+      P&L to the caller and must be popped before the dict is used as a row
+      update. `ft_positions` does have a `last_pnl_pct` column, but the caller
+      writes it deliberately from the mark it just took — do not conflate the
+      two, or a future non-column transport field will be written blindly.
     """
     expiry = position["expiry"]
     if isinstance(expiry, str):
@@ -276,6 +303,7 @@ def snapshot_setups(setups: list, source: str) -> int:
                 "long_strike": n["long_strike"], "short_strike": n["short_strike"],
                 "long_occ": n["long_occ"], "short_occ": n["short_occ"],
                 "entry_ts": now, "entry_debit": n["entry_debit"],
+                "entry_mid": n["entry_mid"],
                 "entry_stock_price": n["entry_stock_price"],
                 "score_at_entry": n["quality"], "rr_at_entry": n["rr_ratio"],
                 "breakeven_move_pct": n["breakeven_move_pct"],
@@ -297,7 +325,8 @@ def mark_open_positions(now: datetime | None = None) -> int:
     """Re-price every open position and advance its state. Never raises."""
     try:
         now = now or datetime.now(timezone.utc)
-        today = now.date()
+        # ET, not UTC: see the ET constant above.
+        today = now.astimezone(ET).date()
         positions = ft_store.list_open_positions()
         if not positions:
             return 0
@@ -309,6 +338,7 @@ def mark_open_positions(now: datetime | None = None) -> int:
         quotes = fetch_quotes(symbols)
 
         marked = 0
+        resolved_at_expiry = 0
         for p in positions:
             try:
                 long_mid = quotes.get(p.get("long_occ"))
@@ -316,6 +346,34 @@ def mark_open_positions(now: datetime | None = None) -> int:
                 short_mid = quotes.get(short_occ) if short_occ else 0.0
 
                 if long_mid is None or (short_occ and short_mid is None):
+                    expiry = _as_date(p.get("expiry"))
+                    if expiry is not None and today > expiry:
+                        # An expired option cannot be quoted, so the mark that
+                        # would have closed this position never arrives. Check
+                        # expiry BEFORE the failure counter: otherwise every
+                        # expiring position accrues failures and closes as
+                        # `unpriceable`, which is excluded from every statistic
+                        # — and the excluded population is not random (spreads
+                        # that ground sideways, and winners that hit T1 then
+                        # faded), so the win rate silently censors itself.
+                        last = p.get("last_pnl_pct")
+                        if last is None:
+                            # Never successfully marked in its whole life —
+                            # there is no P&L to close it with, so this really
+                            # is the spec's `unpriceable` case, not a censored
+                            # outcome. Recording it as expired-with-null would
+                            # leave a row counted in no bucket at all.
+                            ft_store.update_position(p["id"], {
+                                "status": "unpriceable", "closed_ts": now,
+                            })
+                            resolved_at_expiry += 1
+                            continue
+                        upd = {"status": "expired", "closed_ts": now}
+                        upd["realized_pnl_pct"] = realized_pnl({**p, **upd}, last)
+                        ft_store.update_position(p["id"], upd)
+                        resolved_at_expiry += 1
+                        continue
+
                     # A missing quote is not a price of zero. Count the failure
                     # and leave the position open.
                     failures = (p.get("mark_failures") or 0) + 1
@@ -336,12 +394,15 @@ def mark_open_positions(now: datetime | None = None) -> int:
                 # without a migration.
                 ft_store.insert_mark(p["id"], now, spread_mid, pnl, None)
 
-                expiry = p["expiry"]
-                if isinstance(expiry, str):
-                    expiry = date.fromisoformat(expiry)
-                upd = apply_mark({**p, "expiry": expiry}, pnl, now, today)
+                upd = apply_mark({**p, "expiry": _as_date(p.get("expiry"))},
+                                 pnl, now, today)
 
+                # Transport-only key, popped so it is never written blindly.
                 final = upd.pop("last_pnl_pct", None)
+                # Persisted deliberately, as a real column: an expiring position
+                # gets no final quote, so this is the only value left to close
+                # it with.
+                upd["last_pnl_pct"] = pnl
                 if upd.get("closed_ts") is not None:
                     upd["realized_pnl_pct"] = realized_pnl({**p, **upd}, final)
                 else:
@@ -356,7 +417,20 @@ def mark_open_positions(now: datetime | None = None) -> int:
                              p.get("id"), e)
                 continue
 
-        logger.info("forward test: marked %d/%d open positions", marked, len(positions))
+        if marked == 0 and resolved_at_expiry == 0:
+            # Not one open position could be priced. The realistic cause is a
+            # symbol-format mismatch between what we request and what Schwab
+            # echoes back, which raises no exception anywhere and would quietly
+            # close the entire dataset as `unpriceable` in MAX_MARK_FAILURES
+            # ticks. Make it visible in the logs instead.
+            logger.error(
+                "forward test: 0 of %d open positions could be marked — every "
+                "quote lookup missed. Check OCC symbol round-tripping in "
+                "fetch_quotes; unfixed, the whole dataset closes as "
+                "unpriceable within %d ticks.", len(positions), MAX_MARK_FAILURES)
+
+        logger.info("forward test: marked %d/%d open positions (%d resolved at expiry)",
+                    marked, len(positions), resolved_at_expiry)
         return marked
     except Exception as e:
         logger.exception("forward test: mark_open_positions failed: %s", e)

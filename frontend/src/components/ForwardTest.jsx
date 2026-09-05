@@ -59,8 +59,10 @@ export default function ForwardTest() {
       )}
 
       <div style={styles.caveat}>
-        Measured on spread mid, not fills — real trading crosses the bid/ask and
-        will underperform these numbers. {stats.open_count} still open
+        Entry is booked at the natural (long ask − short bid) while every exit
+        is marked on mid, so each position starts about one round-trip
+        half-spread under water — these numbers understate the raw signal, more
+        so on wider spreads. {stats.open_count} still open
         {stats.unpriceable_count > 0 && `, ${stats.unpriceable_count} unpriceable`}.
       </div>
 

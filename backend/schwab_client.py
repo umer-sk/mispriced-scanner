@@ -435,8 +435,19 @@ def fetch_quotes(symbols: list[str]) -> dict[str, float]:
             data = resp.json() if hasattr(resp, "json") else {}
             for sym, payload in (data or {}).items():
                 q = payload.get("quote") or {}
-                bid, ask = _safe_float(q.get("bidPrice")), _safe_float(q.get("askPrice"))
-                if bid > 0 and ask > 0:
+                # -1.0 sentinel: an absent or unparseable bid is distinguishable
+                # from a genuine 0.00 bid, which a plain 0.0 default would not be.
+                bid = _safe_float(q.get("bidPrice"), -1.0)
+                ask = _safe_float(q.get("askPrice"))
+                # A zero bid with a live ask (0.00 / 0.05) is a real, tradeable
+                # market worth 0.025 — not a missing quote. Rejecting it would
+                # censor exactly the positions that went to near-zero, i.e. the
+                # total losses, and inflate the measured win rate.
+                #
+                # An ABSENT bid is a different thing: no data, not a zero
+                # market. That still yields no entry, so a genuinely missing
+                # quote can never be mistaken for a price.
+                if ask > 0 and bid >= 0:
                     out[sym] = round((bid + ask) / 2, 4)
         except Exception as e:
             logger.error("fetch_quotes failed for %d symbols: %s", len(chunk), e)

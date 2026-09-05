@@ -245,6 +245,7 @@ def _construct_long_call(
         long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
         liquidity_ok=liq_ok,
         long_occ=long_occ, short_occ="",
+        entry_mid=round(call.mid, 4),
     )
 
 
@@ -312,6 +313,7 @@ def _construct_long_put(
         long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
         liquidity_ok=liq_ok,
         long_occ=long_occ, short_occ="",
+        entry_mid=round(put.mid, 4),
     )
 
 
@@ -394,6 +396,7 @@ def _construct_bull_call_spread_technical(
         long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
         liquidity_ok=liq_ok,
         long_occ=long_occ, short_occ=short_occ,
+        entry_mid=round(long_leg.mid - short_leg.mid, 4),
     )
 
 
@@ -476,6 +479,7 @@ def _construct_bear_put_spread_technical(
         long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
         liquidity_ok=liq_ok,
         long_occ=long_occ, short_occ=short_occ,
+        entry_mid=round(long_leg.mid - short_leg.mid, 4),
     )
 
 

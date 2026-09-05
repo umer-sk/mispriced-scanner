@@ -17,6 +17,11 @@ create table ft_positions (
 
   entry_ts            timestamptz not null,
   entry_debit         numeric not null,
+  -- entry_debit is the worst-case fill (long ask - short bid); entry_mid is
+  -- the mid-to-mid entry (long mid - short mid). Every mark is mid-to-mid, so
+  -- keeping both makes a like-for-like series recoverable without re-running
+  -- history. Null when the setup carried no derivable mid.
+  entry_mid           numeric,
   entry_stock_price   numeric not null,
   score_at_entry      int,
   rr_at_entry         numeric,
@@ -38,7 +43,12 @@ create table ft_positions (
 
   times_seen          int not null default 1,
   last_seen_ts        timestamptz not null,
-  mark_failures       int not null default 0
+  mark_failures       int not null default 0,
+
+  -- P&L of the most recent successful mark. An expired option cannot be
+  -- quoted, so the mark that would close the position never arrives; this is
+  -- the value the position is closed with when expiry passes.
+  last_pnl_pct        numeric
 );
 
 -- Dedup is against OPEN positions only, so the same setup recurring after a

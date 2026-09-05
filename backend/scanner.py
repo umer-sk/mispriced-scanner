@@ -902,6 +902,7 @@ def construct_best_spread(
         timestamp=datetime.now(timezone.utc),
         order_string=order_string,
         long_occ=long_occ, short_occ=short_occ,
+        entry_mid=round(long_leg.mid - short_leg.mid, 4),
     )
 
 
@@ -1079,6 +1080,7 @@ def construct_bear_put_spread(
         scenarios_expiry=scenarios_expiry,
         score=0, timestamp=datetime.now(timezone.utc), order_string=order_string,
         long_occ=long_occ, short_occ=short_occ,
+        entry_mid=round(long_leg.mid - short_leg.mid, 4),
     )
 
 

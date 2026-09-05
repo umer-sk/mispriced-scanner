@@ -108,3 +108,18 @@ def test_earnings_flag_reads_the_right_field_per_source():
     assert normalise(_trade_setup(catalyst=cat), "scanner")["earnings_in_window"] is True
     assert normalise(_technical_setup(earnings_within_dte=True),
                      "technical")["earnings_in_window"] is True
+
+
+def test_entry_mid_is_carried_when_the_setup_has_one():
+    # entry_debit is the worst-case fill; entry_mid is the mid-to-mid entry
+    # every mark is measured against. Both are needed to unpick the bias.
+    n = normalise(_trade_setup(entry_mid=2.75), "scanner")
+    assert n["entry_debit"] == 3.0
+    assert n["entry_mid"] == 2.75
+    t = normalise(_technical_setup(entry_mid=2.3), "technical")
+    assert t["entry_mid"] == 2.3
+
+
+def test_entry_mid_is_none_when_not_derivable_never_guessed():
+    assert normalise(_trade_setup(), "scanner")["entry_mid"] is None
+    assert normalise(_technical_setup(), "technical")["entry_mid"] is None

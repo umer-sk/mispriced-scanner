@@ -43,6 +43,8 @@ def test_mid_is_bid_ask_average():
 
 
 def test_none_bid_or_ask_yields_no_entry():
+    # A genuinely missing quote must never become a price. An ABSENT bid is
+    # missing data, not a zero market — distinct from the zero-bid case below.
     sym_missing_bid = _occ(2)
     sym_none_ask = _occ(3)
     payloads = {
@@ -54,6 +56,42 @@ def test_none_bid_or_ask_yields_no_entry():
         quotes = fetch_quotes([sym_missing_bid, sym_none_ask])
     assert sym_missing_bid not in quotes
     assert sym_none_ask not in quotes
+    assert quotes == {}
+
+
+def test_both_sides_absent_is_no_quote_at_all():
+    sym = _occ(6)
+    client = _client_returning({sym: {"quote": {}}})
+    with patch.object(schwab_client, "_get_client", return_value=client):
+        quotes = fetch_quotes([sym])
+    assert quotes == {}
+
+
+def test_zero_bid_with_a_live_ask_is_a_real_market_not_a_missing_quote():
+    # 0.00 / 0.05 is a tradeable market with a mid of 0.025. Discarding it
+    # would censor exactly the positions that went to near-zero — the total
+    # losses — and inflate the forward test's measured win rate.
+    sym = _occ(7)
+    client = _client_returning({sym: {"quote": {"bidPrice": 0.0, "askPrice": 0.05}}})
+    with patch.object(schwab_client, "_get_client", return_value=client):
+        quotes = fetch_quotes([sym])
+    assert quotes[sym] == 0.025
+
+
+def test_zero_bid_and_zero_ask_yields_no_entry():
+    # No ask means nothing is offered: there is no market to mark against.
+    sym = _occ(8)
+    client = _client_returning({sym: {"quote": {"bidPrice": 0.0, "askPrice": 0.0}}})
+    with patch.object(schwab_client, "_get_client", return_value=client):
+        quotes = fetch_quotes([sym])
+    assert quotes == {}
+
+
+def test_unparseable_bid_is_treated_as_absent_not_as_zero():
+    sym = _occ(9)
+    client = _client_returning({sym: {"quote": {"bidPrice": "n/a", "askPrice": 0.05}}})
+    with patch.object(schwab_client, "_get_client", return_value=client):
+        quotes = fetch_quotes([sym])
     assert quotes == {}
 
 

@@ -99,10 +99,11 @@ judgement.
 
 **Entry points.** `snapshot_setups(setups, source)` and `mark_open_positions()`
 are both called from `_run_scan` (`main.py`), after the `chains_ok` guard so a
-failed scan never records positions, and `mark_open_positions()` alone runs
-after `snapshot_setups(setups, "technical")` inside `_run_technical_scan`. Both
-functions do sequential Supabase/Schwab I/O, so both run via
-`run_in_executor` — off the event loop, like every other blocking call in these
+failed scan never records positions. `_run_technical_scan` calls
+`snapshot_setups(setups, "technical")` only — it does **not** mark. Marking
+therefore happens exactly four times a day, on the four `/scan` ticks, which is
+the intended cadence. Both functions do sequential Supabase/Schwab I/O, so both
+run via `run_in_executor` — off the event loop, like every other blocking call in these
 scan functions — so `/health` and `/opportunities` don't stall and the scan
 lock doesn't hold the loop hostage for other triggers while `_scan_lock` is
 held.
@@ -124,13 +125,30 @@ still Tier C.
 
 **Read the caveats below with every number this feature produces:**
 
-1. **Mid, not fills.** Targets and stops are evaluated on the spread mid; real
-   fills cross the bid/ask. Live trading will underperform these figures, more
-   so on wider spreads.
+1. **Entry at the natural, exits on mid — the bias runs *against* the
+   tracker, not for it.** `entry_debit` is the worst-case fill
+   (`long_leg.ask - short_leg.bid`), while every mark is `long_mid -
+   short_mid`. Each position therefore starts roughly one round-trip
+   half-spread under water: the +50%/+100% targets are *harder* to reach than
+   nominal and the −50% stop *easier*, and the distortion grows with spread
+   width. These figures **understate** the raw signal. `entry_mid` (the
+   mid-to-mid entry) is stored on every position so a like-for-like mid-to-mid
+   series can be computed from the same rows without re-running history.
 2. **Thin sample.** Roughly 1–3 new positions a day. Any per-detector (or
    per-tier, per-source) row is only meaningful read alongside its `n` —
    `aggregate()` and the UI both surface `n` for exactly this reason.
-3. **`unpriceable` is not a loss.** A position that fails to get a quote 8
+3. **`expired` uses the last recorded mark.** An expired option cannot be
+   quoted, so no closing quote ever arrives. `mark_open_positions` checks
+   expiry *before* the mark-failure counter and closes the position as
+   `expired` from `last_pnl_pct`, the P&L of its most recent successful mark.
+   Do not reorder those two checks: with the failure counter first, every
+   expiring position lands in `unpriceable` instead, and that excluded
+   population is not random — it is exactly the spreads that ground sideways
+   and the winners that hit T1 and faded — so the win rate would censor itself
+   with nothing on screen to say so. A position past expiry that was *never*
+   successfully marked has no P&L to close with and does become `unpriceable`,
+   which is the honest answer there.
+4. **`unpriceable` is not a loss.** A position that fails to get a quote 8
    marks running is closed as `unpriceable` and excluded from statistics
    entirely — it counts as neither a win nor a loss.
 
@@ -141,7 +159,10 @@ requested (`long_occ`/`short_occ`). These are assumed identical. If Schwab ever
 normalizes or reformats the symbol on the way back, every lookup misses,
 `mark_failures` increments on every open position on every tick, and after 8
 ticks the entire dataset quietly closes itself out as `unpriceable` — with no
-exception, no log spike, nothing to point at. `backend/tests/test_fetch_quotes.py`
+exception anywhere. `mark_open_positions` now logs a `logger.error` when there
+are open positions and **none** of them could be marked, so this shows up in
+the Render logs on the first bad tick instead of eight ticks later as an empty
+dataset. `backend/tests/test_fetch_quotes.py`
 (`test_request_response_key_identity`) pins the current identity behavior;
 if that test ever needs to change to accommodate a Schwab response format
 change, `mark_open_positions` needs a corresponding fix, not just the test.

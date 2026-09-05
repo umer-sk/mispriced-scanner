@@ -133,6 +133,12 @@ class TradeSetup:
     score_breakdown: list[dict] = field(default_factory=list)
     long_occ: str = ""
     short_occ: str = ""
+    # Mid-to-mid entry price (long_leg.mid - short_leg.mid) at construction
+    # time. net_debit is the worst-case fill (long ask - short bid) while every
+    # forward-test mark is mid-to-mid, so the two are not comparable; keeping
+    # the entry mid makes a like-for-like series recoverable later. None means
+    # "not derivable" — never a guessed value.
+    entry_mid: Optional[float] = None
 
 
 @dataclass
@@ -251,3 +257,5 @@ class TechnicalSetup:
     liquidity_ok: bool = False
     long_occ: str = ""
     short_occ: str = ""
+    # See TradeSetup.entry_mid — `premium` is the worst-case fill, this is mid.
+    entry_mid: Optional[float] = None
