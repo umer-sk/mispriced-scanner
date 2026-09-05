@@ -21,7 +21,11 @@ jobs:
       - name: Build frontend
         run: |
           cd frontend
-          npm install
+          # npm ci, not npm install: installs exactly what package-lock.json
+          # pins and fails loudly if the lockfile and package.json disagree.
+          # npm install would silently re-resolve, so every deploy could ship
+          # different dependency versions than the last one.
+          npm ci
           VITE_BACKEND_URL=${{ secrets.BACKEND_URL }} npm run build
 
       - name: Deploy to GitHub Pages
