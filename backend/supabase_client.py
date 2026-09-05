@@ -4,6 +4,7 @@ Gracefully no-ops if SUPABASE_URL / SUPABASE_KEY are not set (local dev).
 """
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from supabase import create_client, Client
@@ -12,14 +13,36 @@ logger = logging.getLogger(__name__)
 
 _client: Client | None = None
 
+# If client construction raises (e.g. malformed URL/key), don't hammer
+# create_client() on every call from a hot scan loop — but don't cache the
+# failure forever either, so a fixed configuration can recover without a
+# process restart. A short cooldown gets both: at most one error log and one
+# retry attempt per window.
+_last_failure_monotonic: float | None = None
+_FAILURE_RETRY_SECONDS = 60
+
 
 def _get_client() -> Client | None:
-    global _client
-    if _client is None:
-        url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_KEY")
-        if url and key:
-            _client = create_client(url, key)
+    global _client, _last_failure_monotonic
+    if _client is not None:
+        return _client
+
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
+    if not (url and key):
+        return None
+
+    if (_last_failure_monotonic is not None
+            and time.monotonic() - _last_failure_monotonic < _FAILURE_RETRY_SECONDS):
+        return None
+
+    try:
+        _client = create_client(url, key)
+        _last_failure_monotonic = None
+    except Exception as e:
+        logger.error("Supabase client construction failed: %s", e)
+        _last_failure_monotonic = time.monotonic()
+        return None
     return _client
 
 
