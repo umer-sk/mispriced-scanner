@@ -310,46 +310,51 @@ def mark_open_positions(now: datetime | None = None) -> int:
 
         marked = 0
         for p in positions:
-            long_mid = quotes.get(p.get("long_occ"))
-            short_occ = p.get("short_occ") or ""
-            short_mid = quotes.get(short_occ) if short_occ else 0.0
+            try:
+                long_mid = quotes.get(p.get("long_occ"))
+                short_occ = p.get("short_occ") or ""
+                short_mid = quotes.get(short_occ) if short_occ else 0.0
 
-            if long_mid is None or (short_occ and short_mid is None):
-                # A missing quote is not a price of zero. Count the failure and
-                # leave the position open.
-                failures = (p.get("mark_failures") or 0) + 1
-                if failures >= MAX_MARK_FAILURES:
-                    ft_store.update_position(p["id"], {
-                        "mark_failures": failures, "status": "unpriceable",
-                        "closed_ts": now,
-                    })
+                if long_mid is None or (short_occ and short_mid is None):
+                    # A missing quote is not a price of zero. Count the failure
+                    # and leave the position open.
+                    failures = (p.get("mark_failures") or 0) + 1
+                    if failures >= MAX_MARK_FAILURES:
+                        ft_store.update_position(p["id"], {
+                            "mark_failures": failures, "status": "unpriceable",
+                            "closed_ts": now,
+                        })
+                    else:
+                        ft_store.update_position(p["id"], {"mark_failures": failures})
+                    continue
+
+                spread_mid = round(long_mid - (short_mid or 0.0), 4)
+                pnl = round(pnl_pct(spread_mid, p["entry_debit"]), 2)
+                # stock_price is left null: quoting the underlying would add one
+                # request per distinct symbol for a field nothing currently reads.
+                # The column stays in the schema so it can be backfilled later
+                # without a migration.
+                ft_store.insert_mark(p["id"], now, spread_mid, pnl, None)
+
+                expiry = p["expiry"]
+                if isinstance(expiry, str):
+                    expiry = date.fromisoformat(expiry)
+                upd = apply_mark({**p, "expiry": expiry}, pnl, now, today)
+
+                final = upd.pop("last_pnl_pct", None)
+                if upd.get("closed_ts") is not None:
+                    upd["realized_pnl_pct"] = realized_pnl({**p, **upd}, final)
                 else:
-                    ft_store.update_position(p["id"], {"mark_failures": failures})
+                    upd.pop("closed_ts", None)
+
+                if p.get("mark_failures"):
+                    upd["mark_failures"] = 0
+                ft_store.update_position(p["id"], upd)
+                marked += 1
+            except Exception as e:
+                logger.error("forward test: could not mark position %s: %s",
+                             p.get("id"), e)
                 continue
-
-            spread_mid = round(long_mid - (short_mid or 0.0), 4)
-            pnl = round(pnl_pct(spread_mid, p["entry_debit"]), 2)
-            # stock_price is left null: quoting the underlying would add one
-            # request per distinct symbol for a field nothing currently reads.
-            # The column stays in the schema so it can be backfilled later
-            # without a migration.
-            ft_store.insert_mark(p["id"], now, spread_mid, pnl, None)
-
-            expiry = p["expiry"]
-            if isinstance(expiry, str):
-                expiry = date.fromisoformat(expiry)
-            upd = apply_mark({**p, "expiry": expiry}, pnl, now, today)
-
-            final = upd.pop("last_pnl_pct", None)
-            if upd.get("closed_ts") is not None:
-                upd["realized_pnl_pct"] = realized_pnl({**p, **upd}, final)
-            else:
-                upd.pop("closed_ts", None)
-
-            if p.get("mark_failures"):
-                upd["mark_failures"] = 0
-            ft_store.update_position(p["id"], upd)
-            marked += 1
 
         logger.info("forward test: marked %d/%d open positions", marked, len(positions))
         return marked

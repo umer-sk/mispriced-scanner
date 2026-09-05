@@ -100,6 +100,24 @@ def test_mark_gives_up_after_the_failure_ceiling():
     assert updates[0]["closed_ts"] == NOW
 
 
+def test_mark_resets_failure_count_on_a_successful_mark():
+    # A position that failed to price a few times and then marks successfully
+    # must not carry those failures toward MAX_MARK_FAILURES.
+    pos = {"id": "p1", "long_occ": "L", "short_occ": "S", "entry_debit": 3.0,
+           "expiry": "2026-10-16", "status": "open", "t1_ts": None,
+           "t2_ts": None, "stop_ts": None, "mfe_pct": 0.0, "mae_pct": 0.0,
+           "mark_failures": 3}
+    updates = []
+    with patch.object(forward_test.ft_store, "list_open_positions", return_value=[pos]), \
+         patch.object(forward_test, "fetch_quotes", return_value={"L": 6.0, "S": 1.5}), \
+         patch.object(forward_test.ft_store, "insert_mark"), \
+         patch.object(forward_test.ft_store, "update_position",
+                      side_effect=lambda i, f: updates.append(f)):
+        n = forward_test.mark_open_positions(now=NOW)
+    assert n == 1
+    assert updates[0]["mark_failures"] == 0
+
+
 def test_single_leg_position_uses_the_long_mid_alone():
     pos = {"id": "p1", "long_occ": "L", "short_occ": "", "entry_debit": 2.0,
            "expiry": "2026-10-16", "status": "open", "t1_ts": None,

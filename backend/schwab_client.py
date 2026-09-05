@@ -412,7 +412,12 @@ def fetch_quotes(symbols: list[str]) -> dict[str, float]:
     """
     if not symbols:
         return {}
-    symbols = [s for s in symbols if _looks_like_occ_symbol(s)]
+    shaped = [s for s in symbols if _looks_like_occ_symbol(s)]
+    dropped = [s for s in symbols if s not in shaped]
+    if dropped:
+        logger.warning("fetch_quotes: dropped %d symbol(s) failing OCC shape check: %s",
+                        len(dropped), dropped)
+    symbols = shaped
     if not symbols:
         return {}
     out: dict[str, float] = {}
