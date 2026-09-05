@@ -88,3 +88,124 @@ def test_trend_opposition_is_tier_c():
     tier, failed = classify(_base(trend_opposes=True))
     assert tier == "C"
     assert failed == ["trend"]
+
+
+# Finding 1: RR gate has zero test coverage
+def test_rr_below_minimum_is_tier_c():
+    """rr_ratio < 2.0 is the sole failure; should be Tier C (not a near-miss gate)."""
+    tier, failed = classify(_base(rr_ratio=1.5))
+    assert tier == "C"
+    assert failed == ["rr"]
+
+
+# Finding 2: Boundary tests for all thresholds
+def test_spread_max_pct_boundary_pass():
+    """long_leg_spread_pct exactly at 6.0 should PASS (operator is >)."""
+    tier, failed = classify(_base(long_leg_spread_pct=6.0))
+    assert tier == "A"
+    assert failed == []
+
+
+def test_spread_max_pct_boundary_fail():
+    """long_leg_spread_pct at 6.1 should FAIL as sole Tier C."""
+    tier, failed = classify(_base(long_leg_spread_pct=6.1))
+    assert tier == "C"
+    assert failed == ["liquidity"]
+
+
+def test_dte_min_boundary_pass():
+    """dte_at_entry exactly at 25 should PASS (operator is <=)."""
+    tier, failed = classify(_base(dte_at_entry=25))
+    assert tier == "A"
+    assert failed == []
+
+
+def test_dte_min_boundary_fail():
+    """dte_at_entry at 24 should FAIL as sole Tier C."""
+    tier, failed = classify(_base(dte_at_entry=24))
+    assert tier == "C"
+    assert failed == ["dte"]
+
+
+def test_dte_max_boundary_pass():
+    """dte_at_entry exactly at 45 should PASS (operator is <=)."""
+    tier, failed = classify(_base(dte_at_entry=45))
+    assert tier == "A"
+    assert failed == []
+
+
+def test_dte_max_boundary_fail():
+    """dte_at_entry at 46 should FAIL as sole Tier C."""
+    tier, failed = classify(_base(dte_at_entry=46))
+    assert tier == "C"
+    assert failed == ["dte"]
+
+
+def test_quality_min_boundary_pass():
+    """quality exactly at 60 should PASS (Tier A)."""
+    tier, failed = classify(_base(quality=60))
+    assert tier == "A"
+    assert failed == []
+
+
+def test_quality_near_miss_lower():
+    """quality at 59 should FAIL but within near-miss band (>= 50), Tier B."""
+    tier, failed = classify(_base(quality=59))
+    assert tier == "B"
+    assert failed == ["quality"]
+
+
+def test_quality_near_miss_floor():
+    """quality at 50 should FAIL but at the floor of near-miss band, Tier B."""
+    tier, failed = classify(_base(quality=50))
+    assert tier == "B"
+    assert failed == ["quality"]
+
+
+def test_quality_wide_miss():
+    """quality at 49 should FAIL and outside near-miss band (< 50), Tier C."""
+    tier, failed = classify(_base(quality=49))
+    assert tier == "C"
+    assert failed == ["quality"]
+
+
+def test_breakeven_max_pct_boundary_pass():
+    """abs(breakeven_move_pct) exactly at 3.5 should PASS (operator is >)."""
+    tier, failed = classify(_base(breakeven_move_pct=3.5))
+    assert tier == "A"
+    assert failed == []
+
+
+def test_breakeven_near_miss_lower():
+    """abs(breakeven_move_pct) at 3.6 should FAIL but within near-miss band (<= 5.0), Tier B."""
+    tier, failed = classify(_base(breakeven_move_pct=3.6))
+    assert tier == "B"
+    assert failed == ["breakeven"]
+
+
+def test_breakeven_near_miss_ceil():
+    """abs(breakeven_move_pct) at 5.0 should FAIL but at the ceiling of near-miss band, Tier B."""
+    tier, failed = classify(_base(breakeven_move_pct=5.0))
+    assert tier == "B"
+    assert failed == ["breakeven"]
+
+
+def test_breakeven_wide_miss():
+    """abs(breakeven_move_pct) at 5.1 should FAIL and outside near-miss band (> 5.0), Tier C."""
+    tier, failed = classify(_base(breakeven_move_pct=5.1))
+    assert tier == "C"
+    assert failed == ["breakeven"]
+
+
+def test_breakeven_near_miss_lower_negative():
+    """abs(breakeven_move_pct) at -3.6 should FAIL but within near-miss band, Tier B."""
+    tier, failed = classify(_base(breakeven_move_pct=-3.6))
+    assert tier == "B"
+    assert failed == ["breakeven"]
+
+
+def test_breakeven_wide_miss_negative():
+    """abs(breakeven_move_pct) at -5.1 should FAIL and outside near-miss band, Tier C."""
+    tier, failed = classify(_base(breakeven_move_pct=-5.1))
+    assert tier == "C"
+    assert failed == ["breakeven"]
