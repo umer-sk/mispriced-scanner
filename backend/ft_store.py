@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 POSITIONS = "ft_positions"
 MARKS = "ft_marks"
 
+# fetch_all_positions caps its result at this many rows (ordered entry_ts
+# desc) to bound the response. Once the table passes this count, the cap
+# silently drops the OLDEST rows — exactly the earliest fully-closed trades
+# the win rate depends on. Callers should compare the returned row count
+# against this constant to detect that truncation and surface it.
+MAX_FETCH_POSITIONS = 1000
+
 
 def _encode(value: Any) -> Any:
     if isinstance(value, (datetime, date)):
@@ -114,7 +121,7 @@ def fetch_all_positions(status: str | None = None,
             q = q.eq("status", status)
         if tier:
             q = q.eq("tier", tier)
-        return q.order("entry_ts", desc=True).limit(1000).execute().data or []
+        return q.order("entry_ts", desc=True).limit(MAX_FETCH_POSITIONS).execute().data or []
     except Exception as e:
         logger.error("forward test: fetch_all_positions failed: %s", e)
         return []

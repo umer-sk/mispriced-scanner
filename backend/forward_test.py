@@ -382,7 +382,7 @@ def aggregate(positions: list[dict]) -> dict:
     """Summarise closed positions. Open ones are counted, never averaged in —
     including them would quietly dilute every number."""
     closed = [p for p in positions
-              if p.get("status") in {"target1", "target2", "stopped", "expired"}
+              if p.get("status") in {"target2", "stopped", "expired"}
               and p.get("realized_pnl_pct") is not None]
     open_count = sum(1 for p in positions if p.get("status") in {"open", "target1"}
                      and p.get("realized_pnl_pct") is None)

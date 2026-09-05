@@ -202,8 +202,14 @@ async def _run_scan_inner() -> None:
         save_scan_results("opportunities", [_serialize(s) for s in filtered], scan_ts)
 
         # After the chains_ok guard, so a failed scan never records positions.
-        snapshot_setups(filtered, "scanner")
-        mark_open_positions()
+        # Both do sequential Supabase/Schwab I/O (snapshot: 1-2 round-trips per
+        # setup; marking: a query, a chunked quote fetch, two writes per open
+        # position) — off the event loop like every other blocking call above,
+        # so /health and /opportunities don't stall and the scan lock doesn't
+        # hold the loop hostage for other triggers.
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, snapshot_setups, filtered, "scanner")
+        await loop.run_in_executor(None, mark_open_positions)
 
         elapsed = time.monotonic() - t_start
         logger.info(
@@ -272,7 +278,7 @@ async def _run_technical_scan() -> None:
             _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
             _cache["last_scan_error"] = None
             save_scan_results("technical_setups", [_serialize(s) for s in setups], tech_ts)
-            snapshot_setups(setups, "technical")
+            await loop.run_in_executor(None, snapshot_setups, setups, "technical")
             elapsed = time.monotonic() - t_start
             logger.info("Technical scan complete: %d setups, %.1fs", len(setups), elapsed)
         except Exception as e:
@@ -562,7 +568,25 @@ async def get_celt_setups(
 async def get_forward_test(request: Request):
     import ft_store
     from forward_test import aggregate
-    return JSONResponse(content=aggregate(ft_store.fetch_all_positions()))
+    try:
+        rows = ft_store.fetch_all_positions()
+        result = aggregate(rows)
+        # fetch_all_positions caps at MAX_FETCH_POSITIONS rows ordered
+        # entry_ts desc — once the table exceeds that, the cap silently
+        # drops the oldest (fully-closed) rows the win rate depends on.
+        # Surface it rather than let the aggregate look complete.
+        result["rows_fetched"] = len(rows)
+        result["truncated"] = len(rows) == ft_store.MAX_FETCH_POSITIONS
+        return JSONResponse(content=result)
+    except Exception as e:
+        # aggregate() is not itself guarded (e.g. a malformed
+        # realized_pnl_pct raises TypeError on comparison) — this is a
+        # public route, so never let that turn into a 500.
+        logger.exception("forward test: /forward-test failed: %s", e)
+        result = aggregate([])
+        result["rows_fetched"] = 0
+        result["truncated"] = False
+        return JSONResponse(content=result)
 
 
 @app.get("/forward-test/positions")
@@ -573,9 +597,13 @@ async def get_forward_test_positions(
     tier: Optional[str] = None,
 ):
     import ft_store
-    return JSONResponse(content={
-        "positions": ft_store.fetch_all_positions(status=status, tier=tier),
-    })
+    try:
+        return JSONResponse(content={
+            "positions": ft_store.fetch_all_positions(status=status, tier=tier),
+        })
+    except Exception as e:
+        logger.exception("forward test: /forward-test/positions failed: %s", e)
+        return JSONResponse(content={"positions": []})
 
 
 @app.get("/scan-celt")
