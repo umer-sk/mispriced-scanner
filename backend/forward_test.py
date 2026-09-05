@@ -164,7 +164,24 @@ def apply_mark(position: dict, pnl: float, now: datetime, today: date) -> dict:
     Order matters: targets are checked before the stop so a mark that gapped
     through both is recorded as reaching the target, and both targets are
     checked on the same mark so a gap past +100% is not recorded as only +50%.
+
+    `position["expiry"]` may be a `date` or an ISO-format `str` (Supabase
+    `date` columns round-trip as strings) — a string is parsed before use.
+
+    Return contract callers must respect:
+    - `closed_ts` is always present in the returned dict. It is `None` when
+      the position stays open on this mark — callers must not blindly write
+      that `None` over an existing `closed_ts` already stored for the
+      position; only a mark that actually closes the position sets it.
+    - `last_pnl_pct` is transport-only: it reports this mark's P&L to the
+      caller (e.g. as the final mark on an expiring position) but is not a
+      column in `ft_positions` and must be popped from the dict before any
+      database write.
     """
+    expiry = position["expiry"]
+    if isinstance(expiry, str):
+        expiry = date.fromisoformat(expiry)
+
     upd: dict = {
         "mfe_pct": max(position.get("mfe_pct") or 0.0, pnl),
         "mae_pct": min(position.get("mae_pct") or 0.0, pnl),
@@ -192,7 +209,7 @@ def apply_mark(position: dict, pnl: float, now: datetime, today: date) -> dict:
         upd["closed_ts"] = now
         return upd
 
-    if today > position["expiry"]:
+    if today > expiry:
         upd["status"] = "expired"
         upd["closed_ts"] = now
 

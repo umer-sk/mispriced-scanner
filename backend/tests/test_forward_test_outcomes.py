@@ -77,8 +77,73 @@ def test_expiry_closes_using_the_last_mark():
 def test_mfe_and_mae_track_extremes():
     upd = apply_mark(_pos(mfe_pct=30.0, mae_pct=-10.0), 45.0, NOW, TODAY)
     assert upd["mfe_pct"] == 45.0 and upd["mae_pct"] == -10.0
+    assert upd["status"] == "open"
+    assert upd["closed_ts"] is None
+    assert upd["last_pnl_pct"] == 45.0
     upd = apply_mark(_pos(mfe_pct=30.0, mae_pct=-10.0), -25.0, NOW, TODAY)
     assert upd["mfe_pct"] == 30.0 and upd["mae_pct"] == -25.0
+    assert upd["status"] == "open"
+    assert upd["closed_ts"] is None
+    assert upd["last_pnl_pct"] == -25.0
+
+
+def test_t1_threshold_fires_at_exactly_plus_50():
+    upd = apply_mark(_pos(), 50.0, NOW, TODAY)
+    assert upd["t1_ts"] == NOW
+    assert upd["status"] == "target1"
+
+
+def test_t1_threshold_does_not_fire_just_below_plus_50():
+    upd = apply_mark(_pos(), 49.999, NOW, TODAY)
+    assert upd["t1_ts"] is None
+    assert upd["status"] == "open"
+
+
+def test_t2_threshold_fires_at_exactly_plus_100():
+    upd = apply_mark(_pos(), 100.0, NOW, TODAY)
+    assert upd["t2_ts"] == NOW
+    assert upd["status"] == "target2"
+    assert upd["closed_ts"] == NOW
+
+
+def test_stop_threshold_fires_at_exactly_minus_50():
+    upd = apply_mark(_pos(), -50.0, NOW, TODAY)
+    assert upd["stop_ts"] == NOW
+    assert upd["status"] == "stopped"
+    assert upd["closed_ts"] == NOW
+
+
+def test_stop_threshold_does_not_fire_just_above_minus_50():
+    upd = apply_mark(_pos(), -49.999, NOW, TODAY)
+    assert upd["stop_ts"] is None
+    assert upd["status"] == "open"
+
+
+def test_expiry_day_itself_does_not_close_the_position():
+    # Options are live on expiry day itself; the comparison is strictly `>`.
+    upd = apply_mark(_pos(expiry=TODAY), 10.0, NOW, TODAY)
+    assert upd["status"] == "open"
+    assert upd["closed_ts"] is None
+
+
+def test_apply_mark_accepts_iso_string_expiry_like_a_date():
+    upd_str = apply_mark(_pos(expiry="2026-09-09"), -20.0, NOW, TODAY)
+    upd_date = apply_mark(_pos(expiry=date(2026, 9, 9)), -20.0, NOW, TODAY)
+    assert upd_str == upd_date
+    assert upd_str["status"] == "expired"
+    assert upd_str["closed_ts"] == NOW
+
+
+def test_realized_pnl_is_none_while_open():
+    assert realized_pnl(_pos(status="open"), None) is None
+
+
+def test_realized_pnl_is_none_at_target1_only():
+    assert realized_pnl(_pos(status="target1", t1_ts=NOW), None) is None
+
+
+def test_realized_pnl_is_none_when_unpriceable():
+    assert realized_pnl(_pos(status="unpriceable"), None) is None
 
 
 def test_realized_target1_then_target2_is_75():
