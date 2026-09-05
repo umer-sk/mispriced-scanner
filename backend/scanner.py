@@ -858,6 +858,17 @@ def construct_best_spread(
         f"{long_leg.strike:.0f}/{short_leg.strike:.0f} CALL @{net_debit:.2f} LMT"
     )
 
+    from occ import build_occ
+    _is_put = False
+    try:
+        long_occ = long_leg.occ_symbol or build_occ(chain.symbol, long_leg.expiry, _is_put, long_leg.strike)
+    except ValueError:
+        long_occ = ""
+    try:
+        short_occ = short_leg.occ_symbol or build_occ(chain.symbol, short_leg.expiry, _is_put, short_leg.strike)
+    except ValueError:
+        short_occ = ""
+
     return TradeSetup(
         symbol=chain.symbol,
         stock_price=S,
@@ -890,6 +901,7 @@ def construct_best_spread(
         score=0,  # filled by caller
         timestamp=datetime.now(timezone.utc),
         order_string=order_string,
+        long_occ=long_occ, short_occ=short_occ,
     )
 
 
@@ -1039,6 +1051,17 @@ def construct_bear_put_spread(
         f"{long_leg.strike:.0f}/{short_leg.strike:.0f} PUT @{net_debit:.2f} LMT"
     )
 
+    from occ import build_occ
+    _is_put = True
+    try:
+        long_occ = long_leg.occ_symbol or build_occ(chain.symbol, long_leg.expiry, _is_put, long_leg.strike)
+    except ValueError:
+        long_occ = ""
+    try:
+        short_occ = short_leg.occ_symbol or build_occ(chain.symbol, short_leg.expiry, _is_put, short_leg.strike)
+    except ValueError:
+        short_occ = ""
+
     return TradeSetup(
         symbol=chain.symbol, stock_price=S, signal=signal, catalyst=catalyst,
         structure="bear_put_spread",
@@ -1055,6 +1078,7 @@ def construct_bear_put_spread(
         scenarios_5d=scenarios_5d, scenarios_10d=scenarios_10d,
         scenarios_expiry=scenarios_expiry,
         score=0, timestamp=datetime.now(timezone.utc), order_string=order_string,
+        long_occ=long_occ, short_occ=short_occ,
     )
 
 

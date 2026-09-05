@@ -107,7 +107,11 @@ def _safe_int(val, default: int = 0) -> int:
         return default
 
 
-def _parse_contracts(raw_map: dict) -> list[OptionContract]:
+def _parse_contracts(
+    raw_map: dict,
+    underlying: str | None = None,
+    is_put: bool | None = None,
+) -> list[OptionContract]:
     """Parse Schwab option chain map into OptionContract list.
     Schwab format: {expiry_str:days -> {strike_str -> [contracts]}}
     """
@@ -133,6 +137,17 @@ def _parse_contracts(raw_map: dict) -> list[OptionContract]:
                 mid = round((bid + ask) / 2, 2) if (bid + ask) > 0 else 0.0
 
                 iv_raw = _safe_float(c.get("volatility"))
+                # Schwab sends the OCC symbol; prefer it. Only construct one as
+                # a fallback, and only when we know the root and the side —
+                # never guess, because a wrong symbol quotes a different
+                # company's option and the error would be invisible.
+                occ_symbol = str(c.get("symbol") or "")
+                if not occ_symbol and underlying and is_put is not None:
+                    from occ import build_occ
+                    try:
+                        occ_symbol = build_occ(underlying, exp_date, is_put, strike)
+                    except ValueError:
+                        occ_symbol = ""
                 contracts.append(OptionContract(
                     strike=strike,
                     expiry=exp_date,
@@ -150,6 +165,7 @@ def _parse_contracts(raw_map: dict) -> list[OptionContract]:
                     vega=_safe_float(c.get("vega")),
                     theoretical_value=_safe_float(c.get("theoreticalOptionValue")),
                     in_the_money=bool(c.get("inTheMoney", False)),
+                    occ_symbol=occ_symbol,
                 ))
     return contracts
 
@@ -281,8 +297,8 @@ def fetch_option_chain(symbol: str, days_out: int = 105) -> OptionChainData:
         hv30 = _compute_hv30(closes[-31:])
         iv_rank, iv_percentile = _compute_iv_rank(iv30, closes)
 
-        calls = _parse_contracts(data.get("callExpDateMap", {}))
-        puts = _parse_contracts(data.get("putExpDateMap", {}))
+        calls = _parse_contracts(data.get("callExpDateMap", {}), underlying=symbol, is_put=False)
+        puts = _parse_contracts(data.get("putExpDateMap", {}), underlying=symbol, is_put=True)
 
         chain = OptionChainData(
             symbol=symbol,

@@ -21,6 +21,7 @@ class OptionContract:
     vega: float
     theoretical_value: float
     in_the_money: bool
+    occ_symbol: str = ""      # OCC symbol, e.g. "NVDA  261016C00190000"
 
 
 @dataclass
@@ -130,6 +131,8 @@ class TradeSetup:
     technical_context: Optional[TechnicalContext] = None
     # Score breakdown for UI transparency
     score_breakdown: list[dict] = field(default_factory=list)
+    long_occ: str = ""
+    short_occ: str = ""
 
 
 @dataclass
