@@ -313,19 +313,76 @@ cd backend && grep -n "_parse_contracts(" schwab_client.py
 
 Change the calls parse to `_parse_contracts(<existing arg>, underlying=symbol, is_put=False)` and the puts parse to `_parse_contracts(<existing arg>, underlying=symbol, is_put=True)`.
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [ ] **Step 6: Add the leg symbols to `TradeSetup`**
+
+Without these, `normalise` reads `""` for every scanner setup and `snapshot_setups` skips all of them — the main scanner would record nothing at all.
+
+In `backend/models.py`, in the `TradeSetup` dataclass, add after `score_breakdown`:
+
+```python
+    long_occ: str = ""
+    short_occ: str = ""
+```
+
+- [ ] **Step 7: Populate them in both spread constructors**
+
+In `backend/scanner.py`, find the two `TradeSetup(` constructions:
+
+```bash
+cd backend && grep -n "return TradeSetup(\|TradeSetup(" scanner.py
+```
+
+In `construct_best_spread` (bull call) and `construct_bear_put_spread` (bear put), immediately before the `TradeSetup(` call, add — using `False` for the bull constructor and `True` for the bear one:
+
+```python
+    from occ import build_occ
+    _is_put = <False for bull_call, True for bear_put>
+    try:
+        long_occ = long_leg.occ_symbol or build_occ(chain.symbol, long_leg.expiry, _is_put, long_leg.strike)
+    except ValueError:
+        long_occ = ""
+    try:
+        short_occ = short_leg.occ_symbol or build_occ(chain.symbol, short_leg.expiry, _is_put, short_leg.strike)
+    except ValueError:
+        short_occ = ""
+```
+
+and pass to the constructor:
+
+```python
+        long_occ=long_occ, short_occ=short_occ,
+```
+
+Adjust `chain.symbol` to whatever local holds the underlying symbol in each constructor.
+
+- [ ] **Step 8: Write the test for it**
+
+Append to `backend/tests/test_occ_capture.py`:
+
+```python
+def test_trade_setup_has_occ_fields_defaulting_to_empty():
+    # normalise() reads these; if they are absent, snapshot_setups silently
+    # skips every scanner setup and the forward test records nothing.
+    import dataclasses
+
+    from models import TradeSetup
+    names = {f.name for f in dataclasses.fields(TradeSetup)}
+    assert "long_occ" in names and "short_occ" in names
+```
+
+- [ ] **Step 9: Run tests to verify they pass**
 
 ```bash
 cd backend && ./venv/bin/python -m pytest tests/test_occ_capture.py tests/test_occ.py tests/test_bearish_detectors.py -q
 ```
 
-Expected: `17 passed` — the bearish detector tests are included to confirm the new `OptionContract` field did not break existing positional construction.
+Expected: `18 passed` — the bearish detector tests are included to confirm the new `OptionContract` and `TradeSetup` fields did not break existing positional construction.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add backend/models.py backend/schwab_client.py backend/tests/test_occ_capture.py
-git commit -m "feat: capture OCC symbols on parsed contracts, with safe fallback"
+git add backend/models.py backend/schwab_client.py backend/scanner.py backend/tests/test_occ_capture.py
+git commit -m "feat: capture OCC symbols on contracts and both TradeSetup legs"
 ```
 
 ---
