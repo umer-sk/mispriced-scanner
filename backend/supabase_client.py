@@ -23,6 +23,12 @@ def _get_client() -> Client | None:
     return _client
 
 
+def get_client() -> Client | None:
+    """Public accessor. Returns None when Supabase is not configured, in which
+    case every caller must degrade gracefully rather than raise."""
+    return _get_client()
+
+
 def save_scan_results(cache_key: str, results: list[dict], timestamp: datetime) -> None:
     db = _get_client()
     if db is None:
