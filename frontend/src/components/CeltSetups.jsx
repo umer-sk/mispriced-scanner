@@ -129,6 +129,18 @@ function CeltCard({ setup }) {
               <span style={styles.detailLabel} title="Mid price = (bid + ask) ÷ 2. A fair estimate of what you'd pay with a limit order. Multiply by 100 for total contract cost.">LEAP MID</span>
               <span style={styles.detailVal}>${setup.leap_mid?.toFixed(2)}</span>
             </div>
+            <div style={styles.detailItem}>
+              <span style={styles.detailLabel} title="Bid/ask spread as a percentage of mid. The card quotes mid, but you buy at the ask — this is how much worse your real entry is. Deep-ITM LEAPs are often wide; setups above 15% are rejected outright.">SPREAD</span>
+              <span style={{
+                ...styles.detailVal,
+                color: setup.leap_spread_pct == null || setup.leap_spread_pct < 0 ? '#555'
+                     : setup.leap_spread_pct > 8 ? '#ffaa00' : '#00ffaa',
+              }}>
+                {setup.leap_spread_pct == null || setup.leap_spread_pct < 0
+                  ? '—'
+                  : `${setup.leap_spread_pct.toFixed(1)}%`}
+              </span>
+            </div>
           </div>
           {setup.entry_notes && (
             <div style={styles.notes}>{setup.entry_notes}</div>

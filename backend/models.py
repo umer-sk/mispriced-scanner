@@ -213,6 +213,8 @@ class CeltSetup:
 
     confidence: int            # 0–100
     entry_notes: str
+    leap_spread_pct: float = -1.0  # 0-100, bid/ask as % of mid; -1 = unknown
+                                   # (0.0 would read as a perfectly tight market)
 
 
 @dataclass

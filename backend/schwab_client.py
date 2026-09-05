@@ -196,12 +196,26 @@ def _compute_iv_rank(iv30: float, closes: list[float]) -> tuple[float, float]:
 
     iv30 must be in decimal form (e.g. 0.29); caller is responsible for normalisation.
     Guard handles legacy whole-number values defensively.
+
+    NOTE the guard is lossy above 1.0: a genuine 120% IV (1.2) is indistinguishable
+    from a legacy "1.2%" and gets divided by 100. That is harmless for a blended
+    30-day IV, which effectively never exceeds 100%, but NOT for a front-month IV
+    in a crash — which is exactly when it does. Callers holding a value they know
+    is already decimal must use iv_rank_from_decimal() directly.
+    """
+    return iv_rank_from_decimal(
+        iv30 / 100.0 if iv30 > 1.0 else iv30, closes
+    )
+
+
+def iv_rank_from_decimal(iv_dec: float, closes: list[float]) -> tuple[float, float]:
+    """Rank an already-decimal IV against the realised-HV30 distribution.
+
+    No normalisation heuristic — the caller has asserted the unit, so a 150% IV
+    (1.5) ranks as 150%, not as 1.5%.
     """
     if len(closes) < 32:
         return 50.0, 50.0
-
-    # iv30 is already normalised to decimal by the caller; guard handles legacy callers
-    iv_dec = iv30 / 100.0 if iv30 > 1.0 else iv30
 
     log_returns = [
         math.log(closes[i] / closes[i - 1])
