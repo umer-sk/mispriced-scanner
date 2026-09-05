@@ -9,24 +9,57 @@ import ForwardTest from './components/ForwardTest.jsx'
 
 const REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes
 
+// Symbol -> sector ETF. MUST cover every symbol in backend/qqq_holdings.py:
+// an unmapped symbol resolves to undefined and is filtered out of EVERY sector,
+// so it silently becomes unreachable through the sector UI. This map had 50
+// entries against 93 holdings, hiding 43 symbols. See the unmapped-count
+// warning below, which makes any future drift visible instead of silent —
+// holdings are updated quarterly and this map will drift again.
 const SECTOR_MAP = {
+  // Technology
   NVDA:'XLK', AAPL:'XLK', MSFT:'XLK', AVGO:'XLK', AMD:'XLK',
   ADBE:'XLK', QCOM:'XLK', INTC:'XLK', CSCO:'XLK', TXN:'XLK',
   INTU:'XLK', MU:'XLK', AMAT:'XLK', LRCX:'XLK', MRVL:'XLK',
   KLAC:'XLK', CDNS:'XLK', SNPS:'XLK', PLTR:'XLK', CRWD:'XLK',
   PANW:'XLK', FTNT:'XLK', ZS:'XLK', NET:'XLK', DDOG:'XLK',
-  WDAY:'XLK', TEAM:'XLK',
+  WDAY:'XLK', TEAM:'XLK', ON:'XLK', NXPI:'XLK', MCHP:'XLK',
+  ARM:'XLK', GFS:'XLK', CTSH:'XLK', ROP:'XLK', FSLR:'XLK',
+  TTD:'XLK', MSTR:'XLK',
+  // Communication Services
   META:'XLC', GOOGL:'XLC', GOOG:'XLC', NFLX:'XLC', TTWO:'XLC', DASH:'XLC',
+  TMUS:'XLC', CMCSA:'XLC', EA:'XLC', WBD:'XLC', RBLX:'XLC',
+  // Consumer Discretionary
   AMZN:'XLY', TSLA:'XLY', COST:'XLY', ABNB:'XLY', MELI:'XLY',
-  AMGN:'XLV', ISRG:'XLV', DXCM:'XLV',
-  PYPL:'XLF', COIN:'XLF', VRSK:'XLF',
-  ODFL:'XLI',
-  MNST:'XLP', KDP:'XLP',
-  EXC:'XLU', AEP:'XLU',
+  PDD:'XLY', BKNG:'XLY', SBUX:'XLY', ROST:'XLY', LULU:'XLY',
+  ORLY:'XLY', MAR:'XLY', DKNG:'XLY',
+  // Health Care
+  AMGN:'XLV', ISRG:'XLV', DXCM:'XLV', GILD:'XLV', REGN:'XLV',
+  VRTX:'XLV', BIIB:'XLV', IDXX:'XLV', MRNA:'XLV', GEHC:'XLV',
+  ILMN:'XLV',
+  // Financials
+  PYPL:'XLF', COIN:'XLF', VRSK:'XLF', ACGL:'XLF',
+  // Industrials
+  ODFL:'XLI', FAST:'XLI', PCAR:'XLI', CPRT:'XLI', CTAS:'XLI',
+  CSX:'XLI', HON:'XLI', ADP:'XLI', PAYX:'XLI', LYFT:'XLI',
+  // Consumer Staples
+  MNST:'XLP', KDP:'XLP', MDLZ:'XLP',
+  // Utilities
+  EXC:'XLU', AEP:'XLU', CEG:'XLU',
+  // Real Estate
   CSGP:'XLRE',
 }
 
 const styles = {
+  unmappedWarning: {
+    margin: '0 16px 8px',
+    padding: '8px 12px',
+    background: '#2a1f00',
+    border: '1px solid #665200',
+    borderRadius: '4px',
+    color: '#ffaa00',
+    fontFamily: 'monospace',
+    fontSize: '11px',
+  },
   tabBar: {
     display: 'flex',
     gap: '2px',
@@ -92,6 +125,10 @@ export default function App() {
   }, [])
 
   const opportunities = data?.opportunities ?? []
+  // Any opportunity whose symbol is missing from SECTOR_MAP would vanish from
+  // every sector without trace. Count them so drift surfaces instead of
+  // silently hiding setups.
+  const unmapped = opportunities.filter(o => !SECTOR_MAP[o.symbol])
   const visibleOpps = activeSector
     ? opportunities.filter(o => SECTOR_MAP[o.symbol] === activeSector)
     : opportunities
@@ -139,6 +176,14 @@ export default function App() {
             activeSector={activeSector}
             onSectorClick={setActiveSector}
           />
+          {activeSector && unmapped.length > 0 && (
+            <div style={styles.unmappedWarning}>
+              ⚠ {unmapped.length} setup{unmapped.length > 1 ? 's are' : ' is'} hidden by this
+              filter because {unmapped.length > 1 ? 'their symbols are' : 'its symbol is'} not
+              in SECTOR_MAP ({unmapped.map(o => o.symbol).join(', ')}).
+              Holdings change quarterly — add {unmapped.length > 1 ? 'them' : 'it'} in App.jsx.
+            </div>
+          )}
           <Dashboard
             data={filteredData}
             loading={loading}

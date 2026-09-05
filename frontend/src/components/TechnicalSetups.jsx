@@ -1,34 +1,58 @@
 import { useState, useEffect, useRef } from 'react'
 import { fetchTechnicalSetups, triggerSetupsScan } from '../api.js'
 
-const SIGNAL_LABELS = {
-  price_vs_ema21: 'Price>21EMA',
-  ema_alignment:  '13/21 EMA',
-  stage2:         'Stage 2',
-  rsi_zone:       'RSI',
-  volume_accum:   'Volume',
-  rs_vs_qqq:      'RS vs QQQ',
-  breakout:       'Near High',
-}
-
-const SIGNAL_TOOLTIPS = {
-  price_vs_ema21: 'Price is above the 21-day EMA — short-term momentum is up',
-  ema_alignment:  '13-day EMA is above 21-day EMA — EMAs are stacked bullishly',
-  stage2:         'Price > MA50 > MA200 — Minervini Stage 2 uptrend: price leads both averages',
-  rsi_zone:       'RSI(14) is between 45–75 and rising — in the momentum zone, not yet overbought',
-  volume_accum:   '5-day avg volume exceeds 20-day avg — institutional accumulation signal',
-  rs_vs_qqq:      'Stock outperformed QQQ over the last 10 days — showing relative strength vs the index',
-  breakout:       'Price is within 5% of its 50-day high — coiling near a potential breakout level',
+// Each of the 7 signals is computed as a BULLISH test in the backend
+// (score_signals in technical_scanner.py), and a bearish setup fires a badge
+// when that test is FALSE. So the label and the tooltip must both flip with
+// direction — otherwise a bearish card shows "✓ RS vs QQQ" hovering as
+// "outperformed QQQ", which is the exact opposite of what the tick means.
+//
+// Note stage2 and rsi_zone are compound conditions, so their bearish form is a
+// negation ("not in a Stage 2 uptrend"), not a positive bear signal. The text
+// says so rather than overstating it.
+const SIGNALS = {
+  price_vs_ema21: {
+    bullish: { label: 'Price>21EMA', tip: 'Price is above the 21-day EMA — short-term momentum is up' },
+    bearish: { label: 'Price<21EMA', tip: 'Price is at or below the 21-day EMA — short-term momentum is down' },
+  },
+  ema_alignment: {
+    bullish: { label: '13/21 EMA', tip: '13-day EMA is above the 21-day EMA — EMAs stacked bullishly' },
+    bearish: { label: '13/21 EMA', tip: '13-day EMA is at or below the 21-day EMA — EMAs stacked bearishly' },
+  },
+  stage2: {
+    bullish: { label: 'Stage 2', tip: 'Price > MA50 > MA200 — Minervini Stage 2 uptrend: price leads both averages' },
+    bearish: { label: 'No Stage 2', tip: 'The Price > MA50 > MA200 stack does NOT hold. This is the absence of an uptrend, not proof of a downtrend' },
+  },
+  rsi_zone: {
+    bullish: { label: 'RSI', tip: 'RSI(14) is between 45–75 and rising — in the momentum zone, not yet overbought' },
+    bearish: { label: 'RSI', tip: 'RSI(14) is outside 45–75, or not rising — no bullish momentum. Does not by itself mean oversold' },
+  },
+  volume_accum: {
+    bullish: { label: 'Volume', tip: '5-day average volume exceeds the 20-day average — accumulation' },
+    bearish: { label: 'Volume', tip: '5-day average volume is at or below the 20-day average — no accumulation' },
+  },
+  rs_vs_qqq: {
+    bullish: { label: 'RS vs QQQ', tip: 'Stock outperformed QQQ over the last 10 days — relative strength vs the index' },
+    bearish: { label: 'RW vs QQQ', tip: 'Stock UNDERperformed QQQ over the last 10 days — relative weakness vs the index' },
+  },
+  breakout: {
+    bullish: { label: 'Near High', tip: 'Price is within 5% of its 50-day high — coiling near a potential breakout' },
+    bearish: { label: 'Off High', tip: 'Price is more than 5% below its 50-day high — not near a breakout level' },
+  },
 }
 
 function SignalBadges({ details, direction }) {
+  const dir = direction === 'bearish' ? 'bearish' : 'bullish'
   return (
     <div style={styles.signals}>
-      {Object.entries(SIGNAL_LABELS).map(([key, label]) => {
+      {Object.entries(SIGNALS).map(([key, variants]) => {
         const isBullishSignal = details[key]
-        const firing = direction === 'bullish' ? isBullishSignal : !isBullishSignal
+        // A bearish setup fires when the bullish test is false.
+        const firing = dir === 'bullish' ? isBullishSignal : !isBullishSignal
+        // Describe what the badge actually asserts in THIS direction.
+        const { label, tip } = variants[dir]
         return (
-          <span key={key} style={{ ...styles.signal, color: firing ? '#00ffaa' : '#333' }} title={SIGNAL_TOOLTIPS[key]}>
+          <span key={key} style={{ ...styles.signal, color: firing ? '#00ffaa' : '#333' }} title={tip}>
             {firing ? '✓' : '·'} {label}
           </span>
         )
