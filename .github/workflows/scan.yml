@@ -171,7 +171,8 @@ jobs:
           import json, sys
           d = json.load(open("health.json"))
           keys = ("status", "last_scan", "data_age_seconds", "token_age_days",
-                  "scan_in_progress", "celt_last_scan", "last_scan_error")
+                  "scan_in_progress", "celt_last_scan", "last_scan_error",
+                  "last_scan_note")
           print(json.dumps({k: d.get(k) for k in keys}, indent=2))
 
           stats = d.get("last_scan_stats") or {}
@@ -182,6 +183,13 @@ jobs:
           # A scan can fail without the HTTP trigger noticing — it runs as a
           # background task and the 200 only means "accepted". Fail the job so
           # this surfaces instead of sitting silently until someone looks.
+          # A benign "found nothing" is reported as last_scan_note, not an
+          # error — CELT correctly finds zero setups outside a crash, and
+          # failing this job daily for that would train everyone to ignore it.
+          note = d.get("last_scan_note")
+          if note:
+              print(f"note: {note}")
+
           err = d.get("last_scan_error")
           if err:
               print(f"::error::Backend reported a failed scan: {err}")

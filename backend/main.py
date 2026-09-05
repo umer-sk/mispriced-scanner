@@ -83,6 +83,7 @@ _cache: dict = {
     "celt_setups": [],        # list[CeltSetup]
     "celt_timestamp": None,   # datetime
     "last_scan_error": None,  # dict | None — set on failure, cleared on success
+    "last_scan_note": None,   # dict | None — benign "nothing found", not a failure
 }
 
 # One scan at a time. The /scan* endpoints are unauthenticated and rate limited
@@ -95,6 +96,22 @@ _scan_lock = asyncio.Lock()
 # this fraction of chains we refuse to overwrite the cache or Supabase, because
 # doing so destroys the last good snapshot and stamps it with a fresh timestamp.
 MIN_CHAIN_SUCCESS_RATIO = 0.5
+
+
+def _record_scan_note(scan: str, message: str) -> None:
+    """A scan completed but produced nothing to store.
+
+    This is NOT an error. CELT correctly finds zero setups whenever the market
+    is not in a crash — which is almost always — and reporting that as a
+    failure flips /health to "degraded" permanently and fails the scheduled
+    job every day, which trains everyone to ignore both.
+    """
+    _cache["last_scan_note"] = {
+        "scan": scan,
+        "note": message,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    logger.info("%s scan: %s", scan, message)
 
 
 def _record_scan_error(scan: str, message: str) -> None:
@@ -241,10 +258,11 @@ async def _run_celt_scan() -> None:
                 # The in-memory copy was already guarded; the Supabase save was
                 # not, so a failure silently emptied the persisted copy and only
                 # became visible after the next cold start.
-                _record_scan_error("celt", "0 setups — not overwriting cached CELT results")
+                _record_scan_note("celt", "0 setups — market not in a crash; cached results kept")
                 return
             celt_ts = datetime.now(timezone.utc)
             _cache["celt_setups"] = setups
+            _cache["last_scan_note"] = None
             _cache["celt_timestamp"] = celt_ts
             _cache["last_scan_error"] = None
             save_scan_results("celt_results", [_serialize(s) for s in setups], celt_ts)
@@ -270,9 +288,10 @@ async def _run_technical_scan() -> None:
                 None, scan_technical_setups, QQQ_TOP50, 2.0, "both"
             )
             if not setups:
-                _record_scan_error("technical", "0 setups — not overwriting cached technical setups")
+                _record_scan_note("technical", "0 setups — cached results kept")
                 return
             _cache["technical_setups"] = setups
+            _cache["last_scan_note"] = None
             tech_ts = datetime.now(timezone.utc)
             _cache["technical_timestamp"] = tech_ts
             _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
@@ -423,6 +442,7 @@ async def health(request: Request):
         "token_age_days": round(_token_age_days(), 2),
         "last_scan_stats": _cache.get("last_scan_stats"),
         "last_scan_error": err,
+        "last_scan_note": _cache.get("last_scan_note"),
         "scan_in_progress": _scan_lock.locked(),
         "celt_last_scan": _cache["celt_timestamp"].isoformat() if _cache["celt_timestamp"] else None,
         "celt_setups_count": len(_cache["celt_setups"]),
