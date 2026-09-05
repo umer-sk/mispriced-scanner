@@ -49,6 +49,31 @@ def _call_put_volume_ratio(chain: OptionChainData) -> float:
     return call_vol / put_vol
 
 
+# Brenner-Subrahmanyam: an ATM straddle is worth ~ S·sigma·sqrt(2T/pi), and a
+# single ATM option half that. These invert an ATM price back to an annualised
+# implied vol so it can be compared against HV30 like for like.
+_STRADDLE_COEF = math.sqrt(2.0 / math.pi)      # ~0.798
+_ATM_OPTION_COEF = _STRADDLE_COEF / 2.0        # ~0.399
+
+
+def _implied_vol_from_atm(price: float, spot: float, dte: int, coef: float) -> float:
+    """Back out annualised implied vol from an ATM option or straddle price."""
+    if spot <= 0 or dte <= 0 or price <= 0:
+        return 0.0
+    return (price / spot) / (coef * math.sqrt(dte / 365.0))
+
+
+def _expected_move_pct(annual_vol: float, dte: int) -> float:
+    """1-sigma move over `dte` CALENDAR days, from an annualised vol.
+
+    Note the 365: the previous code annualised with sqrt(252) trading days and
+    then scaled by calendar days, overstating the move by sqrt(365/252) ~ 1.20.
+    """
+    if annual_vol <= 0 or dte <= 0:
+        return 0.0
+    return annual_vol * math.sqrt(dte / 365.0)
+
+
 def _spread_pct(contract: OptionContract) -> float:
     if contract.mid == 0:
         return 1.0
@@ -403,13 +428,18 @@ def detect_move_underpricing(chain: OptionChainData) -> Optional[MispricingSigna
     implied_move_pct = straddle_cost / S
 
     dte = atm_call.dte
-    hv30_daily = chain.hv30 / math.sqrt(252)
-    expected_move_pct = hv30_daily * math.sqrt(dte)
+    implied_vol = _implied_vol_from_atm(straddle_cost, S, dte, _STRADDLE_COEF)
+    expected_move_pct = _expected_move_pct(chain.hv30, dte)
 
-    if expected_move_pct == 0:
+    if implied_vol == 0 or chain.hv30 == 0:
         return None
 
-    ratio = implied_move_pct / expected_move_pct
+    # Compare implied vol to realised vol — both annualised, so a fairly
+    # priced straddle gives ratio 1.0. The old code divided a straddle *price*
+    # ratio by a 1-sigma move; a straddle is only ~0.8 sigma, and the sigma
+    # itself was mis-annualised, so fair value read ~0.66 and tripped the
+    # "underpriced" branch on essentially every symbol.
+    ratio = implied_vol / chain.hv30
     if ratio >= 0.85:
         return None
 
@@ -435,6 +465,7 @@ def detect_move_underpricing(chain: OptionChainData) -> Optional[MispricingSigna
             "straddle_cost": round(straddle_cost, 2),
             "implied_move_pct": round(implied_move_pct, 4),
             "expected_move_pct": round(expected_move_pct, 4),
+            "implied_vol": round(implied_vol, 4),
             "underpricing_ratio": round(ratio, 3),
             "dte": dte,
             "hv30": round(chain.hv30, 4),
@@ -591,13 +622,16 @@ def detect_downside_move_underpricing(chain: OptionChainData) -> Optional[Mispri
 
     implied_downside_pct = atm_put.ask / S
     dte = atm_put.dte
-    hv30_daily = chain.hv30 / math.sqrt(252)
-    expected_downside_pct = hv30_daily * math.sqrt(dte)
+    # An ATM put is ~0.4 sigma, not 1.0 — comparing its price ratio directly
+    # against a 1-sigma move made this detector fire at max confidence on
+    # essentially every symbol, every scan. Back out implied vol instead.
+    implied_vol = _implied_vol_from_atm(atm_put.ask, S, dte, _ATM_OPTION_COEF)
+    expected_downside_pct = _expected_move_pct(chain.hv30, dte)
 
-    if expected_downside_pct == 0:
+    if implied_vol == 0 or chain.hv30 == 0:
         return None
 
-    ratio = implied_downside_pct / expected_downside_pct
+    ratio = implied_vol / chain.hv30
     if ratio >= 0.85:
         return None
 
@@ -616,6 +650,7 @@ def detect_downside_move_underpricing(chain: OptionChainData) -> Optional[Mispri
             "put_cost": round(atm_put.ask, 2),
             "implied_downside_pct": round(implied_downside_pct, 4),
             "expected_downside_pct": round(expected_downside_pct, 4),
+            "implied_vol": round(implied_vol, 4),
             "underpricing_ratio": round(ratio, 3),
             "dte": dte, "hv30": round(chain.hv30, 4),
         },
@@ -665,9 +700,11 @@ def _calc_pnl_scenarios(
                 # Short leg profit when it loses value
                 short_pnl = -short_pnl
 
-            pnl = long_pnl + short_pnl - net_debit * 100 + net_debit * 100
-            # Correct: net position value change
-            pnl = long_pnl - (-short_pnl if short_leg else 0)
+            # short_pnl is the short position's P&L, so add it. (This was
+            # previously written as `long_pnl - (-short_pnl)` preceded by a
+            # dead assignment — algebraically the same, but it obscured that
+            # the bear path at ~965 was doing something different, and wrong.)
+            pnl = long_pnl + short_pnl
 
         pnl_pct = (pnl / (net_debit * 100)) * 100 if net_debit > 0 else 0.0
 
@@ -960,8 +997,12 @@ def construct_bear_put_spread(
             else:
                 price_change = new_price - S
                 long_pnl = (long_leg.delta * price_change - abs(long_leg.theta) * days) * 100
+                # Already negated on this line — this IS the short position's
+                # P&L, so it must be ADDED. Subtracting it double-counted the
+                # short leg, inflating every bear 5d/10d scenario by 2× that
+                # leg while the at-expiry table above stayed correct.
                 short_pnl = -(short_leg.delta * price_change - abs(short_leg.theta) * days) * 100
-                pnl = long_pnl - short_pnl
+                pnl = long_pnl + short_pnl
             pnl_pct = (pnl / (net_debit * 100)) * 100 if net_debit > 0 else 0.0
             out.append(PnLScenario(
                 label=label, stock_price=round(new_price, 2),
@@ -1031,14 +1072,15 @@ def score_swing_quality(setup: TradeSetup) -> int:
     if setup.catalyst.iv_expansion_likely:
         score += 20
 
-    # Mispricing quality (35 pts max)
-    if setup.signal.detector == "parity":
+    # Mispricing quality (35 pts max). The bearish detectors are the mirrors
+    # of the bullish ones and must score identically — crediting only the
+    # bullish names left every bearish setup 20 points short of an otherwise
+    # identical bullish one, and disagreed with compute_score_breakdown below.
+    if setup.signal.detector in ("parity", "put_parity"):
         score += 20
-    if setup.signal.iv_rank < 20 if hasattr(setup.signal, "iv_rank") else False:
-        score += 15
-    if setup.signal.detector == "skew":
+    if setup.signal.detector in ("skew", "skew_inversion"):
         score += 10
-    if setup.signal.detector == "move":
+    if setup.signal.detector in ("move", "downside_move"):
         score += 10
 
     # IV rank from chain data
@@ -1114,6 +1156,11 @@ def compute_score_breakdown(setup: TradeSetup) -> list[dict]:
         items.append({"label": "Good volume", "pts": 5})
     if 28 <= setup.dte <= 50:
         items.append({"label": "DTE 28–50", "pts": 10})
+    # The only reachable penalty — the dte/rr/debit ones in score_swing_quality
+    # are already excluded by the hard gates in the constructors. Included so
+    # the itemisation sums to the score shown beside it.
+    if setup.long_leg_spread_pct > 8.0:
+        items.append({"label": "Wide bid/ask", "pts": -10})
 
     return items
 

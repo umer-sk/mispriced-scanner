@@ -51,6 +51,9 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
   const [contractCount, setContractCount] = useState(1)
   const [notes, setNotes] = useState('')
   const [scanPhase, setScanPhase] = useState('idle') // 'idle' | 'scanning' | 'done'
+  // `error` is a prop (fetch failures from App); scan-trigger and scan-failure
+  // messages are local, so they can be raised and cleared independently.
+  const [scanError, setScanError] = useState(null)
   const [elapsed, setElapsed] = useState(0)
   const pollRef = useRef(null)
   const elapsedTimerRef = useRef(null)
@@ -68,14 +71,20 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
 
   async function runScan() {
     setScanPhase('scanning')
+    setScanError(null)
     setElapsed(0)
 
+    // Read the baseline BEFORE triggering, not concurrently — running these in
+    // parallel races the trigger against the read, and a health response that
+    // landed after the scan finished would leave the poller waiting forever.
     let baseline = data?.scan_timestamp ?? null
     try {
-      const [, health] = await Promise.all([triggerScan(), fetchHealth()])
+      const health = await fetchHealth()
       baseline = health.last_scan ?? baseline
+      await triggerScan()
     } catch (e) {
       setScanPhase('idle')
+      setScanError(e.message || 'Could not start scan')
       return
     }
 
@@ -84,6 +93,12 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
     pollRef.current = setInterval(async () => {
       try {
         const health = await fetchHealth()
+        if (health.last_scan_error) {
+          clearAllTimers()
+          setScanPhase('idle')
+          setScanError(`Scan failed: ${health.last_scan_error.error}`)
+          return
+        }
         if (health.last_scan && health.last_scan !== baseline) {
           clearAllTimers()
           setScanPhase('done')
@@ -93,12 +108,15 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
       } catch (_) {}
     }, 6000)
 
-    fallbackRef.current = setTimeout(async () => {
+    // A full scan is 93 symbols paced to stay under Schwab's rate limit, so it
+    // runs ~2-3 minutes, longer from a cold start. The old 60s fallback fired
+    // mid-scan and reported "✓ DONE" over unchanged, stale prices. Time out
+    // rather than claim success.
+    fallbackRef.current = setTimeout(() => {
       clearAllTimers()
-      setScanPhase('done')
-      await onRefresh()
-      idleTimerRef.current = setTimeout(() => setScanPhase('idle'), 2000)
-    }, 60000)
+      setScanPhase('idle')
+      setScanError('Scan did not report completion within 5 minutes — it may still be running. Refresh shortly.')
+    }, 300000)
   }
 
   const marketOpen = isMarketOpen()
@@ -110,7 +128,7 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
 
   const scanTime = data?.scan_timestamp
     ? new Date(data.scan_timestamp).toLocaleTimeString('en-US', {
-        hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles'
+        hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York'
       })
     : '—'
 
@@ -159,7 +177,7 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
             {marketOpen ? '● MARKET OPEN' : '○ MARKET CLOSED'}
           </span>
           <span style={{ color: '#555', fontSize: '12px', fontFamily: 'monospace' }}>
-            Last scan: {scanTime}
+            Last scan: {scanTime} ET
           </span>
           <div style={styles.viewToggle}>
             <button
@@ -209,11 +227,16 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
         </div>
       )}
 
+      {/* Scan error banner — trigger failures and backend-reported scan failures */}
+      {scanError && (
+        <div style={styles.errorBanner}>{scanError}</div>
+      )}
+
       {/* Error banner */}
       {error && (
         <div style={styles.errorBanner}>
           Could not fetch latest data: {error}
-          {data && ` — Showing scan from ${scanTime}`}
+          {data && ` — Showing scan from ${scanTime} ET`}
         </div>
       )}
 

@@ -21,8 +21,12 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-# net_score = count(True) - count(False); score of 1 means 4 agree, 3 disagree (4+/7)
-NET_SCORE_THRESHOLD = 1
+# net_score = count(True) - count(False) over 7 booleans, so it is always ODD:
+# -7, -5, -3, -1, 1, 3, 5, 7. A threshold of 1 therefore rejected nothing in
+# "both" mode (abs(score) < 1 is unreachable) and every symbol qualified on a
+# 4-3 coin flip. 3 is the smallest threshold that actually filters: it requires
+# 5 of 7 signals to agree, which is what the module docstring always claimed.
+NET_SCORE_THRESHOLD = 3
 
 
 # ---------------------------------------------------------------------------

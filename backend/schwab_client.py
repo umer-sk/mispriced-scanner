@@ -8,6 +8,9 @@ import math
 import os
 import shutil
 import threading
+import time
+from collections import OrderedDict
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -46,8 +49,24 @@ def _resolve_token_path() -> str:
 
 _EFFECTIVE_TOKEN_PATH = _resolve_token_path()
 
-# In-process caches
-_last_chain_cache: dict[str, OptionChainData] = {}
+# In-process fallback cache: last good chain per (symbol, days_out), served when
+# a live fetch fails. Keyed on days_out as well as symbol because CELT fetches
+# with days_out=730 while everything else uses 105 — sharing a key let a cached
+# two-year LEAP chain be served to the full scan, which then built nominally
+# 35-DTE setups out of contracts expiring years later.
+#
+# Bounded: this used to be an unbounded dict, which made the `del chain` and
+# gc.collect() mitigations in technical_scanner.py no-ops (the cache still held
+# every chain ever fetched) and let /chain/{symbol} grow it without limit.
+_CHAIN_CACHE_MAX = 128
+_last_chain_cache: "OrderedDict[tuple[str, int], OptionChainData]" = OrderedDict()
+
+
+def _cache_chain(key: tuple[str, int], chain: OptionChainData) -> None:
+    _last_chain_cache[key] = chain
+    _last_chain_cache.move_to_end(key)
+    while len(_last_chain_cache) > _CHAIN_CACHE_MAX:
+        _last_chain_cache.popitem(last=False)
 
 # Singleton Schwab client — each client_from_token_file creates a new httpx.Client
 # with its own SSL context (~5 MB). Creating one per symbol (95 symbols = ~475 MB)
@@ -277,15 +296,18 @@ def fetch_option_chain(symbol: str, days_out: int = 105) -> OptionChainData:
             puts=puts,
             is_stale=False,
         )
-        _last_chain_cache[symbol] = chain
+        _cache_chain((symbol, days_out), chain)
         logger.info(f"Fetched chain for {symbol}: stock=${stock_price:.2f} IV30={iv30:.1%} HV30={hv30:.1%} IVR={iv_rank:.0f}")
         return chain
 
     except Exception as e:
         logger.error(f"Failed to fetch chain for {symbol}: {e}")
-        if symbol in _last_chain_cache:
-            stale = _last_chain_cache[symbol]
-            stale.is_stale = True
+        cached = _last_chain_cache.get((symbol, days_out))
+        if cached is not None:
+            # Copy rather than mutating the cached object in place: the same
+            # instance is handed to every caller, so flipping is_stale on it
+            # permanently marks the cached copy.
+            stale = replace(cached, is_stale=True)
             return stale
         # Return empty chain so scanner doesn't crash
         return OptionChainData(
@@ -302,24 +324,49 @@ def fetch_option_chain(symbol: str, days_out: int = 105) -> OptionChainData:
         )
 
 
+_BATCH_SIZE = 5
+
+# fetch_option_chain makes TWO Schwab calls per symbol (get_option_chain +
+# get_price_history), so a 93-symbol scan is ~186 requests. Schwab's limit is
+# 120/min. At the old 2s pause that ran ~185 req/min, and a 429 burst mid-scan
+# does not degrade gracefully — failed chains come back with stock_price 0 and
+# look like an empty market. Pace the batches to stay under the limit with room
+# to spare rather than relying on the guard in main.py to catch the fallout.
+_CALLS_PER_SYMBOL = 2
+_SCHWAB_LIMIT_PER_MIN = 120
+_TARGET_UTILISATION = 0.75   # aim for ~90 req/min
+
+# Seconds each batch must occupy to hold the target rate.
+_BATCH_MIN_SECONDS = (
+    _BATCH_SIZE * _CALLS_PER_SYMBOL
+) / (_SCHWAB_LIMIT_PER_MIN * _TARGET_UTILISATION) * 60
+
+
 async def fetch_all_chains(tickers: list[str]) -> list[OptionChainData]:
     """
-    Fetch all tickers efficiently.
-    Splits into batches of 5, with 2s sleep between batches.
-    Keeps concurrent Schwab responses in memory low on constrained hosts.
+    Fetch all tickers, pacing batches to stay within Schwab's 120 req/min.
+
+    Batches of _BATCH_SIZE keep concurrent Schwab responses in memory low on
+    constrained hosts; the pacing sleep is computed from actual elapsed time so
+    slow batches don't get an additional fixed penalty.
     """
     results: list[OptionChainData] = []
-    batch_size = 5
-    batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
+    batches = [tickers[i:i + _BATCH_SIZE] for i in range(0, len(tickers), _BATCH_SIZE)]
 
     for i, batch in enumerate(batches):
-        if i > 0:
-            await asyncio.sleep(2)
-        loop = asyncio.get_event_loop()
+        t0 = time.monotonic()
+        loop = asyncio.get_running_loop()
         batch_results = await asyncio.gather(
             *[loop.run_in_executor(None, fetch_option_chain, sym) for sym in batch]
         )
         results.extend(batch_results)
-        logger.info(f"Batch {i + 1}/{len(batches)} complete ({len(batch)} symbols)")
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Batch %d/%d complete (%d symbols, %.1fs)", i + 1, len(batches), len(batch), elapsed
+        )
+
+        if i < len(batches) - 1:
+            # Only sleep for the time the batch didn't already consume.
+            await asyncio.sleep(max(0.0, _BATCH_MIN_SECONDS - elapsed))
 
     return results

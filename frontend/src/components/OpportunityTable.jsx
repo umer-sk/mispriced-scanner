@@ -7,6 +7,10 @@ const DETECTOR_LABELS = {
   parity: 'Parity',
   term: 'Term',
   move: 'Move',
+  put_iv_rank: 'Put IV Rank',
+  skew_inversion: 'Skew Inversion',
+  put_parity: 'Put Parity',
+  downside_move: 'Downside Move',
 }
 
 function scoreColor(score) {
@@ -48,8 +52,8 @@ const COLS = [
   {
     key: 'iv_rank',
     label: 'IVR%',
-    get: s => s.signal.raw_data?.iv_rank ?? 0,
-    fmt: v => `${v?.toFixed(0)}%`,
+    get: s => s.signal.raw_data?.iv_rank ?? null,
+    fmt: v => (v == null ? '—' : `${v.toFixed(0)}%`),
   },
   {
     key: 'rr_ratio',
@@ -81,7 +85,7 @@ const COLS = [
     key: 'breakeven_move_pct',
     label: 'BE MOVE',
     get: s => s.breakeven_move_pct,
-    fmt: v => `+${v?.toFixed(1)}%`,
+    fmt: (v, s) => `${s?.structure === 'bear_put_spread' ? '\u2212' : '+'}${v?.toFixed(1)}%`,
   },
   {
     key: 'probability_of_profit',

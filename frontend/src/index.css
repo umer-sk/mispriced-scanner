@@ -2,3 +2,11 @@
   0%   { transform: translateX(-100%); }
   100% { transform: translateX(400%); }
 }
+
+/* Dashboard.jsx's SkeletonCard referenced `pulse`, which was never defined —
+   the cold-start loading state rendered as motionless grey bars,
+   indistinguishable from a hung page. */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}

@@ -1,5 +1,10 @@
 export default function IVRankMeter({ ivRank }) {
-  const pct = Math.max(0, Math.min(100, ivRank || 0))
+  // Only two of the nine detectors carry an IV rank. Render nothing rather
+  // than a 0%-filled bar labelled "near annual floor", which reads as a real
+  // measurement of an unusually cheap option.
+  if (ivRank == null || !Number.isFinite(ivRank)) return null
+
+  const pct = Math.max(0, Math.min(100, ivRank))
 
   let color = '#00ffaa'
   let label = 'near annual floor'

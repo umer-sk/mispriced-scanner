@@ -148,7 +148,31 @@ jobs:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
         run: |
           set -euo pipefail
-          # Give the background task room to finish before reading /health.
-          sleep 120
-          curl -s --max-time 30 "${BACKEND_URL%/}/health" \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({k: d.get(k) for k in ("last_scan","data_age_seconds","token_age_days","celt_last_scan")}, indent=2))'
+          # A full scan is 93 symbols paced under Schwab's rate limit, so it
+          # takes ~2-3 min. Wait for it before judging the result.
+          sleep 240
+          curl -s --max-time 30 "${BACKEND_URL%/}/health" > health.json
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open("health.json"))
+          keys = ("status", "last_scan", "data_age_seconds", "token_age_days",
+                  "scan_in_progress", "celt_last_scan", "last_scan_error")
+          print(json.dumps({k: d.get(k) for k in keys}, indent=2))
+
+          stats = d.get("last_scan_stats") or {}
+          if stats:
+              print(f"chains {stats.get('chains_fetched')}/{stats.get('chains_total')}, "
+                    f"{stats.get('setups_passing')} passing")
+
+          # A scan can fail without the HTTP trigger noticing — it runs as a
+          # background task and the 200 only means "accepted". Fail the job so
+          # this surfaces instead of sitting silently until someone looks.
+          err = d.get("last_scan_error")
+          if err:
+              print(f"::error::Backend reported a failed scan: {err}")
+              sys.exit(1)
+
+          if d.get("token_age_days", 0) > 6:
+              print("::warning::Schwab token is over 6 days old — refresh it "
+                    "(python backend/auth_setup.py) before it expires at 7.")
+          PY

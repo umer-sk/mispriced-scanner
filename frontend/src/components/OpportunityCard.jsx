@@ -58,7 +58,19 @@ export default function OpportunityCard({ setup, onSaveToJournal, defaultExpande
     : 0
   const maxLossDollars = suggestedContracts * net_debit * 100
 
-  const ivRank = signal.raw_data?.iv_rank ?? 50
+  // Only the iv_rank / put_iv_rank detectors put iv_rank into raw_data. The
+  // old `?? 50` invented a plausible-looking "moderate" reading for the other
+  // seven detectors, complete with a half-filled meter. null renders as "n/a".
+  const ivRank = signal.raw_data?.iv_rank ?? null
+
+  // net_theta / net_vega are per-share; a contract is 100 shares.
+  const thetaPerContract = net_theta != null ? net_theta * 100 : null
+  const vegaPerContract = net_vega != null ? net_vega * 100 : null
+
+  // breakeven_move_pct is positive for both structures — it's the size of the
+  // required move, and the direction comes from the structure.
+  const beSign = isBearish ? '−' : '+'
+  const optLetter = isBearish ? 'P' : 'C'
 
   const expiryStr = expiry
     ? new Date(expiry + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
@@ -85,7 +97,7 @@ export default function OpportunityCard({ setup, onSaveToJournal, defaultExpande
             Score: {score}/100 {scoreExpanded ? '▲' : '▼'}
           </span>
           <span style={styles.scoreLabel}>{scoreLabel}</span>
-          <span style={styles.ivr}>IVR: {ivRank?.toFixed(0)}%</span>
+          <span style={styles.ivr}>IVR: {ivRank != null ? `${ivRank.toFixed(0)}%` : 'n/a'}</span>
         </div>
         <div style={styles.headerRight}>
           <span style={styles.detector}>{DETECTOR_LABELS[signal.detector] || signal.detector}</span>
@@ -99,7 +111,7 @@ export default function OpportunityCard({ setup, onSaveToJournal, defaultExpande
             {setup.score_breakdown.map((item, i) => (
               <div key={i} style={styles.breakdownRow}>
                 <span style={styles.breakdownLabel}>{item.label}</span>
-                <span style={styles.breakdownPts}>+{item.pts}</span>
+                <span style={styles.breakdownPts}>{item.pts >= 0 ? '+' : ''}{item.pts}</span>
               </div>
             ))}
             <div style={{ ...styles.breakdownRow, borderTop: '1px solid #2a2a3e', marginTop: '4px', paddingTop: '4px' }}>
@@ -115,7 +127,7 @@ export default function OpportunityCard({ setup, onSaveToJournal, defaultExpande
           {structureLabel} · {expiryStr} ${long_strike?.toFixed(0)}/{short_strike?.toFixed(0)} · DTE {dte}
         </span>
         <span style={styles.metrics}>
-          Debit ${net_debit?.toFixed(2)} · R:R {rr_ratio?.toFixed(2)}:1 · BE +{breakeven_move_pct?.toFixed(1)}%
+          Debit ${net_debit?.toFixed(2)} · R:R {rr_ratio?.toFixed(2)}:1 · BE {beSign}{breakeven_move_pct?.toFixed(1)}%
         </span>
       </div>
 
@@ -168,7 +180,7 @@ export default function OpportunityCard({ setup, onSaveToJournal, defaultExpande
           <div style={styles.section}>
             <div style={styles.sectionTitle}>THE TRADE</div>
             <div style={styles.tradeGrid}>
-              <span style={styles.tradeLine}>BUY {expiryStr} ${long_strike?.toFixed(0)}C / SELL {expiryStr} ${short_strike?.toFixed(0)}C</span>
+              <span style={styles.tradeLine}>BUY {expiryStr} ${long_strike?.toFixed(0)}{optLetter} / SELL {expiryStr} ${short_strike?.toFixed(0)}{optLetter}</span>
               <span />
               <span style={styles.tradeKey}>Net Debit</span>
               <span style={styles.tradeVal}>${net_debit?.toFixed(2)}</span>
@@ -193,13 +205,13 @@ export default function OpportunityCard({ setup, onSaveToJournal, defaultExpande
           <div style={styles.section}>
             <div style={styles.sectionTitle}>LIQUIDITY</div>
             <div style={styles.liqGrid}>
-              <span style={styles.tradeKey}>${long_strike?.toFixed(0)}C</span>
+              <span style={styles.tradeKey}>${long_strike?.toFixed(0)}{optLetter}</span>
               <span style={styles.tradeVal}>OI {long_leg_oi?.toLocaleString()}</span>
               <span style={styles.tradeVal}>Vol {long_leg_volume?.toLocaleString()}</span>
               <span style={{ ...styles.tradeVal, color: long_leg_spread_pct <= 10 ? '#00ffaa' : '#ff4444' }}>
                 Spread {long_leg_spread_pct?.toFixed(1)}% {long_leg_spread_pct <= 10 ? '✓' : '✗'}
               </span>
-              <span style={styles.tradeKey}>${short_strike?.toFixed(0)}C</span>
+              <span style={styles.tradeKey}>${short_strike?.toFixed(0)}{optLetter}</span>
               <span style={styles.tradeVal}>OI {short_leg_oi?.toLocaleString()}</span>
               <span style={styles.tradeVal}>—</span>
               <span style={{ ...styles.tradeVal, color: short_leg_spread_pct <= 10 ? '#00ffaa' : '#ff4444' }}>
@@ -215,9 +227,9 @@ export default function OpportunityCard({ setup, onSaveToJournal, defaultExpande
               <span style={styles.tradeKey}>Net Δ</span>
               <span style={styles.tradeVal}>{net_delta?.toFixed(3)}</span>
               <span style={styles.tradeKey}>Net θ</span>
-              <span style={styles.tradeVal}>${net_theta?.toFixed(3)}/day</span>
+              <span style={styles.tradeVal}>${thetaPerContract?.toFixed(2)}/day</span>
               <span style={styles.tradeKey}>Net ν</span>
-              <span style={styles.tradeVal}>${net_vega?.toFixed(3)}</span>
+              <span style={styles.tradeVal}>${vegaPerContract?.toFixed(2)}</span>
             </div>
           </div>
 

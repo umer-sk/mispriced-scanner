@@ -195,7 +195,7 @@ export default function TechnicalSetups() {
   }
 
   const scanTime = scanTimestamp
-    ? new Date(scanTimestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles' })
+    ? new Date(scanTimestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York' })
     : '—'
 
   return (
@@ -208,7 +208,7 @@ export default function TechnicalSetups() {
         </div>
         <div style={styles.headerRight}>
           {scanTimestamp && (
-            <span style={styles.scanTime}>Last scan: {scanTime}</span>
+            <span style={styles.scanTime}>Last scan: {scanTime} ET</span>
           )}
           <button
             style={{

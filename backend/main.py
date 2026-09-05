@@ -81,25 +81,55 @@ _cache: dict = {
     "last_scan_stats": None,  # dict with diagnostic counts from last scan
     "celt_setups": [],        # list[CeltSetup]
     "celt_timestamp": None,   # datetime
+    "last_scan_error": None,  # dict | None — set on failure, cleared on success
 }
+
+# One scan at a time. The /scan* endpoints are unauthenticated and rate limited
+# only per-IP, so without this a caller could start several full scans
+# concurrently — each ~186 Schwab requests against a 120/min budget, each
+# holding a full set of option chains on a 512MB instance.
+_scan_lock = asyncio.Lock()
+
+# A scan that fetched almost nothing is a failure, not an empty market. Below
+# this fraction of chains we refuse to overwrite the cache or Supabase, because
+# doing so destroys the last good snapshot and stamps it with a fresh timestamp.
+MIN_CHAIN_SUCCESS_RATIO = 0.5
+
+
+def _record_scan_error(scan: str, message: str) -> None:
+    _cache["last_scan_error"] = {
+        "scan": scan,
+        "error": message,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    logger.error("%s scan failed: %s", scan, message)
 
 
 async def _run_scan() -> None:
     """Core scan logic — no day/time guards."""
 
+    if _scan_lock.locked():
+        logger.info("Full scan already in progress — ignoring duplicate trigger")
+        return
+
+    async with _scan_lock:
+        await _run_scan_inner()
+
+
+async def _run_scan_inner() -> None:
     logger.info("Starting full scan of %d symbols", len(QQQ_TOP50))
     t_start = time.monotonic()
 
     try:
         # 1. Market context (fetch QQQ chain first)
-        qqq_chain = await asyncio.get_event_loop().run_in_executor(
+        qqq_chain = await asyncio.get_running_loop().run_in_executor(
             None, fetch_option_chain, "QQQ"
         )
         market_ctx = get_market_context(qqq_chain)
         _cache["market_context"] = market_ctx
 
         # 2. Fetch technical context for all symbols (via yfinance, not Schwab)
-        tech_contexts = await asyncio.get_event_loop().run_in_executor(
+        tech_contexts = await asyncio.get_running_loop().run_in_executor(
             None, get_technical_contexts, QQQ_TOP50
         )
 
@@ -144,9 +174,23 @@ async def _run_scan() -> None:
             },
         }
 
+        # A wholesale fetch failure (expired token, 429 burst, network outage)
+        # yields chains with stock_price == 0, which are skipped above — so
+        # `filtered` comes out empty and looks exactly like a quiet market.
+        # Writing that would overwrite the last good snapshot in both the cache
+        # and Supabase, and stamp it with a fresh timestamp.
+        if chains_ok < len(chains) * MIN_CHAIN_SUCCESS_RATIO:
+            _record_scan_error(
+                "full",
+                f"only {chains_ok}/{len(chains)} chains fetched — refusing to "
+                f"overwrite cached results with a failed scan",
+            )
+            return
+
         _cache["opportunities"] = filtered
         _cache["scan_timestamp"] = datetime.now(timezone.utc)
         _cache["symbols_scanned"] = len(QQQ_TOP50)
+        _cache["last_scan_error"] = None
 
         save_scan_results("opportunities", [_serialize(s) for s in filtered], datetime.now(timezone.utc))
 
@@ -159,51 +203,74 @@ async def _run_scan() -> None:
 
     except Exception as e:
         logger.exception("Scan failed: %s", e)
+        _record_scan_error("full", repr(e))
 
 
 async def _run_celt_scan() -> None:
     """Fetch closes + LEAP chains for all symbols, find CELT setups."""
-    t_start = time.monotonic()
-    logger.info("Starting CELT scan of %d symbols", len(QQQ_TOP50))
-    try:
-        loop = asyncio.get_event_loop()
-        setups = await loop.run_in_executor(None, scan_celt_setups, QQQ_TOP50)
-        if setups:
+    if _scan_lock.locked():
+        logger.info("Another scan in progress — ignoring CELT trigger")
+        return
+
+    async with _scan_lock:
+        t_start = time.monotonic()
+        logger.info("Starting CELT scan of %d symbols", len(QQQ_TOP50))
+        try:
+            loop = asyncio.get_running_loop()
+            setups = await loop.run_in_executor(None, scan_celt_setups, QQQ_TOP50)
+            if not setups:
+                # Same trap as the full scan: an empty result is far more often
+                # a yfinance/Schwab failure than a genuine "no setups today".
+                # The in-memory copy was already guarded; the Supabase save was
+                # not, so a failure silently emptied the persisted copy and only
+                # became visible after the next cold start.
+                _record_scan_error("celt", "0 setups — not overwriting cached CELT results")
+                return
             _cache["celt_setups"] = setups
-        _cache["celt_timestamp"] = datetime.now(timezone.utc)
-        save_scan_results("celt_results", [_serialize(s) for s in setups], datetime.now(timezone.utc))
-        elapsed = time.monotonic() - t_start
-        logger.info("CELT scan complete: %d setups, %.1fs", len(setups), elapsed)
-    except Exception as e:
-        logger.error("CELT scan failed: %s", e)
+            _cache["celt_timestamp"] = datetime.now(timezone.utc)
+            _cache["last_scan_error"] = None
+            save_scan_results("celt_results", [_serialize(s) for s in setups], datetime.now(timezone.utc))
+            elapsed = time.monotonic() - t_start
+            logger.info("CELT scan complete: %d setups, %.1fs", len(setups), elapsed)
+        except Exception as e:
+            logger.exception("CELT scan failed: %s", e)
+            _record_scan_error("celt", repr(e))
 
 
 async def _run_technical_scan() -> None:
     """Fetch price history + option chains for all symbols, find technical setups."""
-    t_start = time.monotonic()
-    logger.info("Starting technical scan of %d symbols", len(QQQ_TOP50))
-    try:
-        loop = asyncio.get_event_loop()
-        setups = await loop.run_in_executor(
-            None, scan_technical_setups, QQQ_TOP50, 2.0, "both"
-        )
-        if setups:
+    if _scan_lock.locked():
+        logger.info("Another scan in progress — ignoring technical trigger")
+        return
+
+    async with _scan_lock:
+        t_start = time.monotonic()
+        logger.info("Starting technical scan of %d symbols", len(QQQ_TOP50))
+        try:
+            loop = asyncio.get_running_loop()
+            setups = await loop.run_in_executor(
+                None, scan_technical_setups, QQQ_TOP50, 2.0, "both"
+            )
+            if not setups:
+                _record_scan_error("technical", "0 setups — not overwriting cached technical setups")
+                return
             _cache["technical_setups"] = setups
-        _cache["technical_timestamp"] = datetime.now(timezone.utc)
-        _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
-        save_scan_results("technical_setups", [_serialize(s) for s in _cache["technical_setups"]], datetime.now(timezone.utc))
-        elapsed = time.monotonic() - t_start
-        logger.info("Technical scan complete: %d setups (cache has %d), %.1fs",
-                    len(setups), len(_cache["technical_setups"]), elapsed)
-    except Exception as e:
-        logger.error("Technical scan failed: %s", e)
+            _cache["technical_timestamp"] = datetime.now(timezone.utc)
+            _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
+            _cache["last_scan_error"] = None
+            save_scan_results("technical_setups", [_serialize(s) for s in setups], datetime.now(timezone.utc))
+            elapsed = time.monotonic() - t_start
+            logger.info("Technical scan complete: %d setups, %.1fs", len(setups), elapsed)
+        except Exception as e:
+            logger.exception("Technical scan failed: %s", e)
+            _record_scan_error("technical", repr(e))
 
 
 async def refresh_sector_analysis() -> None:
     """Refresh sector ETF data once daily. Does not require Schwab auth."""
     try:
         logger.info("Refreshing sector analysis")
-        sectors = await asyncio.get_event_loop().run_in_executor(
+        sectors = await asyncio.get_running_loop().run_in_executor(
             None, get_sector_analysis
         )
         _cache["sector_analysis"] = sectors
@@ -233,7 +300,7 @@ async def startup():
         if opps_raw and opps_ts:
             _cache["opportunities"] = opps_raw   # plain dicts — _attr() handles these
             _cache["scan_timestamp"] = opps_ts
-            _cache["symbols_scanned"] = len(opps_raw)
+            _cache["symbols_scanned"] = len(QQQ_TOP50)
             logger.info("Loaded %d opportunities from Supabase (as_of=%s)", len(opps_raw), opps_ts)
     except Exception as e:
         logger.warning("Could not load opportunities from Supabase: %s", e)
@@ -321,14 +388,22 @@ async def trigger_scan(request: Request, background_tasks: BackgroundTasks):
 async def health(request: Request):
     ts = _cache.get("scan_timestamp")
     from market_context import _is_market_open
+    err = _cache.get("last_scan_error")
     return {
-        "status": "ok",
+        # "ok" only means the process is up. A scan can fail without the
+        # process noticing, so callers must check last_scan_error too — the
+        # GitHub Actions workflow fails its job on a non-null value.
+        "status": "degraded" if err else "ok",
         "last_scan": ts.isoformat() if ts else None,
         "data_age_seconds": _data_age_seconds(),
         "market_open": _is_market_open(),
-        "next_scan": _cache["market_context"].next_scan_time if _cache["market_context"] else None,
+        # _attr, not attribute access: after a Supabase restore cached values
+        # are plain dicts, and market_context is a natural thing to persist next.
+        "next_scan": _attr(_cache["market_context"], "next_scan_time"),
         "token_age_days": round(_token_age_days(), 2),
         "last_scan_stats": _cache.get("last_scan_stats"),
+        "last_scan_error": err,
+        "scan_in_progress": _scan_lock.locked(),
         "celt_last_scan": _cache["celt_timestamp"].isoformat() if _cache["celt_timestamp"] else None,
         "celt_setups_count": len(_cache["celt_setups"]),
     }
@@ -479,8 +554,15 @@ async def trigger_celt_scan(request: Request, background_tasks: BackgroundTasks)
 @limiter.limit("5/minute")
 async def get_chain_debug(request: Request, symbol: str):
     """Debug: fetch chain for one symbol and return key diagnostic fields."""
-    chain = await asyncio.get_event_loop().run_in_executor(
-        None, fetch_option_chain, symbol.upper()
+    symbol = symbol.upper()
+    # Restricted to the scanned universe: this endpoint does a live Schwab
+    # fetch per request and caches the result by symbol, so an arbitrary
+    # symbol lets an anonymous caller spend Schwab quota and grow the chain
+    # cache on a 512MB instance.
+    if symbol not in QQQ_TOP50 and symbol != "QQQ":
+        raise HTTPException(status_code=404, detail=f"{symbol} is not in the scanned universe")
+    chain = await asyncio.get_running_loop().run_in_executor(
+        None, fetch_option_chain, symbol
     )
 
     def _fmt(c):

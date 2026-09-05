@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Does
 
-A QQQ options scanner that detects mispriced options contracts across the 30 largest QQQ holdings. It runs automated scans on weekdays (08:00, 09:45, 11:00, 15:45 ET, plus technical at 10:30 and CELT at 16:15), and serves a React dashboard showing trade setups with risk/reward profiles.
+A QQQ options scanner that detects mispriced options contracts across the QQQ holdings in `qqq_holdings.py` (currently 93 symbols). It runs automated scans on weekdays (08:00, 09:45, 11:00, 15:45 ET, plus technical at 10:30 and CELT at 16:15), and serves a React dashboard showing trade setups with risk/reward profiles.
 
 ## Development Commands
 
@@ -30,12 +30,12 @@ npm run preview   # Preview production build
 ### Backend (`backend/`)
 
 - **`main.py`** — FastAPI app, endpoints + in-memory cache. **No in-process scheduler** — see Scheduling below.
-- **`scanner.py`** — 5 mispricing detectors + spread constructor + P&L calculator (~600 lines, core logic)
+- **`scanner.py`** — 9 mispricing detectors + spread constructors + P&L calculator (~1200 lines, core logic)
 - **`schwab_client.py`** — OAuth + option chain fetching + IV calculation via schwab-py SDK
 - **`models.py`** — Dataclasses: `OptionContract`, `OptionChainData`, `TradeSetup`, `MispricingSignal`, `MarketContext`
 - **`catalyst.py`** — Earnings detection, IV trend analysis, human-readable narrative
 - **`market_context.py`** — VIX regime, skip recommendations, token expiry warnings
-- **`qqq_holdings.py`** — Hardcoded list of 30 QQQ holdings (update quarterly)
+- **`qqq_holdings.py`** — Hardcoded list of QQQ holdings, 93 symbols despite the `QQQ_TOP50` name (update quarterly). This count drives Schwab quota and memory.
 
 ### Frontend (`frontend/src/`)
 
@@ -57,13 +57,19 @@ npm run preview   # Preview production build
 1. GitHub Actions (`.github/workflows/scan.yml`) calls `GET /scan` → `_run_scan()`
 2. `fetch_option_chain()` → Schwab API → `OptionChainData`
 3. `get_catalyst_context()` → earnings detection, IV trend, narrative
-4. `run_all_detectors()` → 5 detectors produce `MispricingSignal`
+4. `run_all_detectors()` → 9 detectors produce `MispricingSignal`
 5. `_construct_spread()` → bull call spread, calendar, or long call chosen by context
 6. Results cached in `_cache` dict; scored ≥ 55 and RR ≥ 2.0 surfaced to frontend
 
-### The 5 Detectors
+### The 9 Detectors
 
-`iv_rank`, `skew`, `parity` (put-call), `term` (backwardation), `move` (straddle vs HV)
+Bullish: `iv_rank`, `skew`, `parity` (put-call), `term` (backwardation), `move` (straddle vs HV)
+Bearish mirrors: `put_iv_rank`, `skew_inversion`, `put_parity`, `downside_move`
+
+The `move` and `downside_move` detectors back out an implied vol from the ATM
+straddle/put (Brenner-Subrahmanyam) and compare it to HV30. Do not compare an
+option *price* ratio against a 1-sigma move — a straddle is ~0.8 sigma and a
+single ATM option ~0.4, so that reads fair value as heavily underpriced.
 
 ### Scheduling
 
@@ -94,7 +100,7 @@ Manual run: repo → Actions → Scheduled Scans → Run workflow.
 ```
 SCHWAB_APP_KEY=
 SCHWAB_APP_SECRET=
-SCHWAB_CALLBACK_URL=https://127.0.0.1
+SCHWAB_CALLBACK_URL=https://127.0.0.1:8182
 SCHWAB_TOKEN_PATH=./token.json
 ALLOWED_ORIGIN=http://localhost:5173
 SUPABASE_URL=          # required in prod — see below
@@ -116,7 +122,7 @@ VITE_BACKEND_URL=http://localhost:8000
 
 - **Backend**: Render.com (free tier, spins down after 15 min inactivity)
   - Build: `pip install -r backend/requirements.txt`
-  - Start: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+  - Start: `cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT` (flat imports, no `backend/__init__.py` — `uvicorn backend.main:app` fails with ModuleNotFoundError)
   - `token.json` uploaded as a secret file to `/etc/secrets/token.json`
 - **Frontend**: GitHub Pages (`https://<user>.github.io/mispriced-scanner/`)
   - GitHub Actions auto-deploys on push to `main` when `frontend/**` changes
@@ -126,5 +132,5 @@ VITE_BACKEND_URL=http://localhost:8000
 
 - **Token expiry**: Schwab OAuth token expires every 7 days. Run `python backend/auth_setup.py` locally, then re-upload `token.json` to Render as a secret file.
 - **IV rank history**: Stored in-memory per symbol; resets on server restart.
-- **Schwab rate limits**: 120 req/min — scanner batches 10 symbols with 2-second delays between batches.
+- **Schwab rate limits**: 120 req/min. `fetch_option_chain` makes **two** calls per symbol (chain + price history), so a 93-symbol scan is ~186 requests. `fetch_all_chains` paces batches of 5 to hold ~90 req/min, making a full scan take ~2-3 minutes.
 - **CORS**: Configured for specific origins only (`localhost:3000`, `localhost:5173`, `ALLOWED_ORIGIN`).
