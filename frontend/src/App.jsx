@@ -5,6 +5,7 @@ import TradeJournal from './components/TradeJournal.jsx'
 import SectorStrip from './components/SectorStrip.jsx'
 import TechnicalSetups from './components/TechnicalSetups.jsx'
 import CeltSetups from './components/CeltSetups.jsx'
+import ForwardTest from './components/ForwardTest.jsx'
 
 const REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes
 
@@ -123,6 +124,12 @@ export default function App() {
         >
           MY TRADES
         </button>
+        <button
+          style={{ ...styles.tab, ...(tab === 'forward' ? styles.tabActive : {}) }}
+          onClick={() => setTab('forward')}
+        >
+          FORWARD TEST
+        </button>
       </div>
 
       {tab === 'dashboard' && (
@@ -145,6 +152,7 @@ export default function App() {
       {tab === 'setups' && <TechnicalSetups />}
       {tab === 'celt' && <CeltSetups />}
       {tab === 'journal' && <TradeJournal />}
+      {tab === 'forward' && <ForwardTest />}
     </div>
   )
 }

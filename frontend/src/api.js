@@ -64,3 +64,16 @@ export async function triggerCeltScan() {
   if (!res.ok) throw new Error(`CELT scan failed: ${res.status}`)
   return res.json()
 }
+
+export async function fetchForwardTest() {
+  const res = await fetch(`${BASE_URL}/forward-test`)
+  if (!res.ok) throw new Error(`Forward test error: ${res.status}`)
+  return res.json()
+}
+
+export async function fetchForwardTestPositions(params = {}) {
+  const q = new URLSearchParams(params).toString()
+  const res = await fetch(`${BASE_URL}/forward-test/positions${q ? `?${q}` : ''}`)
+  if (!res.ok) throw new Error(`Forward test positions error: ${res.status}`)
+  return res.json()
+}
