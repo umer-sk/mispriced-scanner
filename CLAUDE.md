@@ -89,8 +89,17 @@ on a cron, and the inbound request is what wakes the instance.
 | 16:15 | `/scan-celt` | CELT scan |
 
 GitHub cron is UTC-only, so each slot has two cron entries (EDT and EST). The
-workflow keys off `github.event.schedule` to look up the intended ET time and
-skips the out-of-season twin. Tolerates up to 30 min of cron lag.
+workflow keys off `github.event.schedule` to look up which season that cron
+belongs to, compares it against the current ET UTC offset, and skips the
+out-of-season twin.
+
+Do not reintroduce a drift/tolerance check here. The first version inferred the
+season from how close the run landed to its intended time, with a 30-minute
+tolerance. GitHub delivered these crons **1.5-3.5 hours late** in practice, so
+every run was judged off-season and skipped — 13 runs reported "success" and
+triggered zero scans. Widening the tolerance is not an option either: the twins
+are exactly 60 minutes apart. Scheduled runs may also be dropped entirely under
+load, so treat the schedule as best-effort and watch `last_scan` on /health.
 
 Manual run: repo → Actions → Scheduled Scans → Run workflow.
 

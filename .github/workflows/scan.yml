@@ -66,29 +66,44 @@ jobs:
             exit 0
           fi
 
-          # cron expression -> intended ET slot + work to do
+          # cron expression -> intended ET slot, work to do, and which DST
+          # season that cron belongs to.
           case "$SCHEDULE" in
-            '0 12 * * 1-5'|'0 13 * * 1-5')   want="08:00"; jobs="scan" ;;
-            '45 13 * * 1-5'|'45 14 * * 1-5') want="09:45"; jobs="sectors scan" ;;
-            '30 14 * * 1-5'|'30 15 * * 1-5') want="10:30"; jobs="technical" ;;
-            '0 15 * * 1-5'|'0 16 * * 1-5')   want="11:00"; jobs="scan" ;;
-            '45 19 * * 1-5'|'45 20 * * 1-5') want="15:45"; jobs="scan" ;;
-            '15 20 * * 1-5'|'15 21 * * 1-5') want="16:15"; jobs="celt" ;;
+            '0 12 * * 1-5')  want="08:00"; jobs="scan";         season="EDT" ;;
+            '0 13 * * 1-5')  want="08:00"; jobs="scan";         season="EST" ;;
+            '45 13 * * 1-5') want="09:45"; jobs="sectors scan"; season="EDT" ;;
+            '45 14 * * 1-5') want="09:45"; jobs="sectors scan"; season="EST" ;;
+            '30 14 * * 1-5') want="10:30"; jobs="technical";    season="EDT" ;;
+            '30 15 * * 1-5') want="10:30"; jobs="technical";    season="EST" ;;
+            '0 15 * * 1-5')  want="11:00"; jobs="scan";         season="EDT" ;;
+            '0 16 * * 1-5')  want="11:00"; jobs="scan";         season="EST" ;;
+            '45 19 * * 1-5') want="15:45"; jobs="scan";         season="EDT" ;;
+            '45 20 * * 1-5') want="15:45"; jobs="scan";         season="EST" ;;
+            '15 20 * * 1-5') want="16:15"; jobs="celt";         season="EDT" ;;
+            '15 21 * * 1-5') want="16:15"; jobs="celt";         season="EST" ;;
             *) echo "::error::Unmapped cron '$SCHEDULE' — add it to the case block."; exit 1 ;;
           esac
 
-          now_min=$(( 10#$(TZ=America/New_York date +%H) * 60 + 10#$(TZ=America/New_York date +%M) ))
-          want_min=$(( 10#${want%%:*} * 60 + 10#${want##*:} ))
-          drift=$(( now_min - want_min )); [ "$drift" -lt 0 ] && drift=$(( -drift ))
+          # Decide the season from the clock, NOT from how close the run landed
+          # to its intended time. The first version inferred it from arrival
+          # drift with a 30-minute tolerance; GitHub actually delivered these
+          # crons 1.5-3.5 HOURS late, so every run was judged off-season and
+          # skipped, and no scheduled scan ran at all. Tolerance can't be
+          # widened past 30 min either — the twins are exactly 60 min apart.
+          # The UTC offset is exact and completely immune to scheduling lag.
+          case "$(TZ=America/New_York date +%z)" in
+            -0400) now_season="EDT" ;;
+            -0500) now_season="EST" ;;
+            *) echo "::error::Unexpected ET offset $(TZ=America/New_York date +%z)"; exit 1 ;;
+          esac
 
-          echo "cron='$SCHEDULE' intended=$want ET now=$(TZ=America/New_York date '+%H:%M %Z') drift=${drift}min"
+          echo "cron='$SCHEDULE' intended=$want $season | now=$(TZ=America/New_York date '+%H:%M %Z') ($now_season)"
 
-          # 30 min absorbs GitHub's usual cron lag; the wrong-season twin of each
-          # pair lands a full hour out and is skipped here.
-          if [ "$drift" -gt 30 ]; then
-            echo "Off-season or excessively delayed — skipping."
+          if [ "$season" != "$now_season" ]; then
+            echo "Wrong DST season for this cron — skipping (its twin handles today)."
             echo "jobs=" >> "$GITHUB_OUTPUT"
           else
+            # Runs even when badly delayed: a late scan is far better than none.
             echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
           fi
 
