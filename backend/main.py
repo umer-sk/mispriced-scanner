@@ -34,6 +34,7 @@ from technical_scanner import scan_technical_setups
 from schwab_client import fetch_all_chains, fetch_option_chain
 from celt_scanner import scan_celt_setups
 from supabase_client import load_scan_results, save_scan_results
+from forward_test import mark_open_positions, snapshot_setups
 
 logging.basicConfig(
     level=logging.INFO,
@@ -200,6 +201,10 @@ async def _run_scan_inner() -> None:
 
         save_scan_results("opportunities", [_serialize(s) for s in filtered], scan_ts)
 
+        # After the chains_ok guard, so a failed scan never records positions.
+        snapshot_setups(filtered, "scanner")
+        mark_open_positions()
+
         elapsed = time.monotonic() - t_start
         logger.info(
             "Scan complete: %d/%d chains ok, %d setups raw, %d opportunities, max_score=%d, %.1fs",
@@ -267,6 +272,7 @@ async def _run_technical_scan() -> None:
             _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
             _cache["last_scan_error"] = None
             save_scan_results("technical_setups", [_serialize(s) for s in setups], tech_ts)
+            snapshot_setups(setups, "technical")
             elapsed = time.monotonic() - t_start
             logger.info("Technical scan complete: %d setups, %.1fs", len(setups), elapsed)
         except Exception as e:
