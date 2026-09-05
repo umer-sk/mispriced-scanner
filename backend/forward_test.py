@@ -147,3 +147,69 @@ def normalise(setup, source: str) -> dict:
         "earnings_in_window": earnings,
         "trend_opposes": trend_opposes,
     }
+
+
+MAX_MARK_FAILURES = 8
+
+
+def pnl_pct(spread_mid: float, entry_debit: float) -> float:
+    if not entry_debit:
+        return 0.0
+    return (spread_mid - entry_debit) / entry_debit * 100.0
+
+
+def apply_mark(position: dict, pnl: float, now: datetime, today: date) -> dict:
+    """Return the position fields to update for one mark.
+
+    Order matters: targets are checked before the stop so a mark that gapped
+    through both is recorded as reaching the target, and both targets are
+    checked on the same mark so a gap past +100% is not recorded as only +50%.
+    """
+    upd: dict = {
+        "mfe_pct": max(position.get("mfe_pct") or 0.0, pnl),
+        "mae_pct": min(position.get("mae_pct") or 0.0, pnl),
+        "t1_ts": position.get("t1_ts"),
+        "t2_ts": position.get("t2_ts"),
+        "stop_ts": position.get("stop_ts"),
+        "status": position.get("status", "open"),
+        "closed_ts": None,
+        "last_pnl_pct": pnl,
+    }
+
+    if pnl >= TARGET_1_PCT and upd["t1_ts"] is None:
+        upd["t1_ts"] = now
+        upd["status"] = "target1"
+
+    if pnl >= TARGET_2_PCT and upd["t2_ts"] is None:
+        upd["t2_ts"] = now
+        upd["status"] = "target2"
+        upd["closed_ts"] = now
+        return upd
+
+    if pnl <= STOP_PCT:
+        upd["stop_ts"] = now
+        upd["status"] = "stopped"
+        upd["closed_ts"] = now
+        return upd
+
+    if today > position["expiry"]:
+        upd["status"] = "expired"
+        upd["closed_ts"] = now
+
+    return upd
+
+
+def realized_pnl(position: dict, final_pnl: float | None) -> float | None:
+    """Blended scale-out: half the position off at each target."""
+    status = position.get("status")
+    hit_t1 = position.get("t1_ts") is not None
+
+    if status == "target2":
+        return (TARGET_1_PCT + TARGET_2_PCT) / 2      # +75%
+    if status == "stopped":
+        return (TARGET_1_PCT + STOP_PCT) / 2 if hit_t1 else STOP_PCT
+    if status == "expired":
+        if final_pnl is None:
+            return None
+        return (TARGET_1_PCT + final_pnl) / 2 if hit_t1 else final_pnl
+    return None
