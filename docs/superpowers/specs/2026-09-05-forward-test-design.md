@@ -151,6 +151,11 @@ create table ft_positions (
 
   entry_ts            timestamptz not null,
   entry_debit         numeric not null,
+  -- entry_debit is the worst-case fill (long ask - short bid); entry_mid is
+  -- the mid-to-mid entry (long mid - short mid). Every mark is mid-to-mid, so
+  -- keeping both makes a like-for-like series recoverable without re-running
+  -- history. Null when the setup carried no derivable mid.
+  entry_mid           numeric,
   entry_stock_price   numeric not null,
   score_at_entry      int,
   rr_at_entry         numeric,
@@ -172,7 +177,12 @@ create table ft_positions (
 
   times_seen          int not null default 1,
   last_seen_ts        timestamptz not null,
-  mark_failures       int not null default 0
+  mark_failures       int not null default 0,
+
+  -- P&L of the most recent successful mark. An expired option cannot be
+  -- quoted, so the mark that would close the position never arrives; this is
+  -- the value the position is closed with when expiry passes.
+  last_pnl_pct        numeric
 );
 
 -- Dedup is against OPEN positions only, so the same setup recurring after a
@@ -327,16 +337,26 @@ status, entry, current mark, MFE/MAE and milestone timestamps.
 - **Quote missing for a contract.** Skip that mark, increment `mark_failures`,
   leave the position open. Do not treat a missing quote as a price move.
 - **Expiry passes with no final mark.** Close as `expired` using the last
-  recorded mark, not as `unpriceable`.
+  recorded mark (`last_pnl_pct`), not as `unpriceable` — but only when the
+  position was marked successfully at least once. A position that was never
+  successfully marked has no last mark to close with; it becomes `unpriceable`
+  instead, deliberately, because an `expired` row with a null P&L would fall
+  into no bucket in `aggregate()` and vanish from the UI entirely.
 - **Position never marked at all** (e.g. bad OCC symbol). After 8 consecutive
   failures, close as `unpriceable` and exclude from statistics rather than
   silently reporting it as a loss.
 
 ## Known limitations — state these wherever results are displayed
 
-**This measures the signal, not achievable P&L.** Targets and stops are evaluated
-on mid; real fills cross the spread. Expect live trading to underperform these
-numbers, more so on wider spreads.
+**Entry at the natural, exits on mid — the bias runs *against* the tracker, not
+for it.** `entry_debit` is booked at the worst-case fill (`long_leg.ask -
+short_leg.bid`), while every subsequent mark is on mid (`long_mid -
+short_mid`). Each position therefore starts roughly one round-trip half-spread
+under water: the +50%/+100% targets are *harder* to reach than nominal and the
+−50% stop *easier*, and the distortion grows with spread width. These figures
+**understate** the raw signal, not overstate it. `entry_mid` (the mid-to-mid
+entry) is captured on every position so a like-for-like mid-to-mid series can
+be computed from the same rows without re-running history.
 
 **Four marks a day is not continuous.** An intraday spike through +50% and back
 can be missed. Results are therefore mildly conservative on the upside.
