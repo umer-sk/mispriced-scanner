@@ -242,3 +242,12 @@ class TechnicalSetup:
     order_string: str
 
     earnings_within_dte: bool = False  # always False (filtered out), kept for transparency
+
+    # Liquidity (forward-test prerequisite — see technical_scanner._leg_liquidity)
+    long_leg_oi: int = 0
+    short_leg_oi: int = 0
+    long_leg_spread_pct: float = 0.0    # 0-100, matching TradeSetup's scale
+    short_leg_spread_pct: float = 0.0
+    liquidity_ok: bool = False
+    long_occ: str = ""
+    short_occ: str = ""

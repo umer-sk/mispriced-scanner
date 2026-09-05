@@ -13,6 +13,7 @@ import pandas as pd
 import yfinance as yf
 
 from models import OptionChainData, TechnicalSetup
+from occ import build_occ
 
 try:
     from schwab_client import fetch_option_chain
@@ -20,6 +21,31 @@ except Exception:
     fetch_option_chain = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+def _leg_liquidity(long_leg, short_leg):
+    """Return (long_oi, short_oi, long_spread_pct, short_spread_pct, ok).
+
+    Spread percentages are 0-100 to match scanner.py, which stores
+    round(_spread_pct(c) * 100, 1). Mixing scales would make the shared
+    forward-test liquidity gate compare a fraction against a percentage.
+    """
+    def pct(c):
+        if c is None or c.mid <= 0:
+            return 100.0          # unpriceable is maximally illiquid
+        return round((c.ask - c.bid) / c.mid * 100, 1)
+
+    long_oi = long_leg.open_interest if long_leg else 0
+    short_oi = short_leg.open_interest if short_leg else 0
+    long_sp = pct(long_leg)
+    short_sp = pct(short_leg) if short_leg else 0.0
+
+    ok = (
+        long_oi >= 100
+        and long_sp <= 10.0
+        and (short_leg is None or (short_oi >= 100 and short_sp <= 10.0))
+    )
+    return long_oi, short_oi, long_sp, short_sp, ok
 
 # net_score = count(True) - count(False) over 7 booleans, so it is always ODD:
 # -7, -5, -3, -1, 1, 3, 5, 7. A threshold of 1 therefore rejected nothing in
@@ -182,6 +208,16 @@ def _construct_long_call(
     breakeven = call.strike + call.ask
     breakeven_move_pct = round((breakeven - stock_price) / stock_price * 100, 1)
 
+    oi_l, oi_s, sp_l, sp_s, liq_ok = _leg_liquidity(call, None)
+    # Match scanner.py's hard gate: reject outright rather than surfacing a
+    # setup that cannot realistically be filled.
+    if oi_l < 100 or sp_l > 15.0:
+        return None
+    try:
+        long_occ = call.occ_symbol or build_occ(symbol, call.expiry, False, call.strike)
+    except ValueError:
+        long_occ = ""
+
     return TechnicalSetup(
         symbol=symbol,
         stock_price=stock_price,
@@ -205,6 +241,10 @@ def _construct_long_call(
             f"BUY +1 {symbol} {call.expiry.strftime('%m/%d')} "
             f"{call.strike:.0f} CALL @{call.ask:.2f} LMT"
         ),
+        long_leg_oi=oi_l, short_leg_oi=oi_s,
+        long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
+        liquidity_ok=liq_ok,
+        long_occ=long_occ, short_occ="",
     )
 
 
@@ -235,6 +275,16 @@ def _construct_long_put(
     breakeven = put.strike - put.ask
     breakeven_move_pct = round((stock_price - breakeven) / stock_price * 100, 1)
 
+    oi_l, oi_s, sp_l, sp_s, liq_ok = _leg_liquidity(put, None)
+    # Match scanner.py's hard gate: reject outright rather than surfacing a
+    # setup that cannot realistically be filled.
+    if oi_l < 100 or sp_l > 15.0:
+        return None
+    try:
+        long_occ = put.occ_symbol or build_occ(symbol, put.expiry, True, put.strike)
+    except ValueError:
+        long_occ = ""
+
     return TechnicalSetup(
         symbol=symbol,
         stock_price=stock_price,
@@ -258,6 +308,10 @@ def _construct_long_put(
             f"BUY +1 {symbol} {put.expiry.strftime('%m/%d')} "
             f"{put.strike:.0f} PUT @{put.ask:.2f} LMT"
         ),
+        long_leg_oi=oi_l, short_leg_oi=oi_s,
+        long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
+        liquidity_ok=liq_ok,
+        long_occ=long_occ, short_occ="",
     )
 
 
@@ -299,6 +353,20 @@ def _construct_bull_call_spread_technical(
     breakeven_move_pct = round((breakeven - stock_price) / stock_price * 100, 1)
     dte = long_leg.dte
 
+    oi_l, oi_s, sp_l, sp_s, liq_ok = _leg_liquidity(long_leg, short_leg)
+    # Match scanner.py's hard gate: reject outright rather than surfacing a
+    # setup that cannot realistically be filled.
+    if oi_l < 100 or sp_l > 15.0 or oi_s < 100 or sp_s > 15.0:
+        return None
+    try:
+        long_occ = long_leg.occ_symbol or build_occ(symbol, long_leg.expiry, False, long_leg.strike)
+    except ValueError:
+        long_occ = ""
+    try:
+        short_occ = short_leg.occ_symbol or build_occ(symbol, short_leg.expiry, False, short_leg.strike)
+    except ValueError:
+        short_occ = ""
+
     return TechnicalSetup(
         symbol=symbol,
         stock_price=stock_price,
@@ -322,6 +390,10 @@ def _construct_bull_call_spread_technical(
             f"BUY +1 {symbol} {long_leg.expiry.strftime('%m/%d')} "
             f"{long_leg.strike:.0f}/{short_leg.strike:.0f} CALL VRT @{net_debit:.2f} LMT"
         ),
+        long_leg_oi=oi_l, short_leg_oi=oi_s,
+        long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
+        liquidity_ok=liq_ok,
+        long_occ=long_occ, short_occ=short_occ,
     )
 
 
@@ -363,6 +435,20 @@ def _construct_bear_put_spread_technical(
     breakeven_move_pct = round((stock_price - breakeven) / stock_price * 100, 1)
     dte = long_leg.dte
 
+    oi_l, oi_s, sp_l, sp_s, liq_ok = _leg_liquidity(long_leg, short_leg)
+    # Match scanner.py's hard gate: reject outright rather than surfacing a
+    # setup that cannot realistically be filled.
+    if oi_l < 100 or sp_l > 15.0 or oi_s < 100 or sp_s > 15.0:
+        return None
+    try:
+        long_occ = long_leg.occ_symbol or build_occ(symbol, long_leg.expiry, True, long_leg.strike)
+    except ValueError:
+        long_occ = ""
+    try:
+        short_occ = short_leg.occ_symbol or build_occ(symbol, short_leg.expiry, True, short_leg.strike)
+    except ValueError:
+        short_occ = ""
+
     return TechnicalSetup(
         symbol=symbol,
         stock_price=stock_price,
@@ -386,6 +472,10 @@ def _construct_bear_put_spread_technical(
             f"BUY +1 {symbol} {long_leg.expiry.strftime('%m/%d')} "
             f"{long_leg.strike:.0f}/{short_leg.strike:.0f} PUT VRT @{net_debit:.2f} LMT"
         ),
+        long_leg_oi=oi_l, short_leg_oi=oi_s,
+        long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
+        liquidity_ok=liq_ok,
+        long_occ=long_occ, short_occ=short_occ,
     )
 
 
