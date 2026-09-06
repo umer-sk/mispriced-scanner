@@ -209,3 +209,19 @@ def test_breakeven_wide_miss_negative():
     tier, failed = classify(_base(breakeven_move_pct=-5.1))
     assert tier == "C"
     assert failed == ["breakeven"]
+
+
+def test_dte_gate_uses_the_bounce_band_when_present():
+    # A normalised bounce dict carries dte_min/dte_max=60/100 instead of the
+    # default 25/45. 75 DTE would fail the default band but must pass here —
+    # without the per-source override, every 200W bounce position is
+    # permanently Tier C regardless of anything else about the trade.
+    tier, failed = classify(_base(dte_at_entry=75, dte_min=60, dte_max=100))
+    assert tier == "A"
+    assert "dte" not in failed
+
+
+def test_dte_gate_falls_back_to_the_default_band_without_the_override():
+    tier, failed = classify(_base(dte_at_entry=75))
+    assert tier == "C"
+    assert "dte" in failed

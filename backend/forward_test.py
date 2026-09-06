@@ -30,6 +30,12 @@ QUALITY_NEAR = {"scanner": 10, "technical": 1}      # Tier B band below threshol
 RR_MIN = 2.0
 SPREAD_MAX_PCT = 6.0
 DTE_MIN, DTE_MAX = 25, 45
+# The 200W MA bounce is deliberately longer-dated (60-100 DTE, see
+# technical_scanner._construct_200w_bounce_long_call) than every other
+# structure this classifies. Without its own band, every bounce position
+# fails the "dte" gate unconditionally and permanently — it can never be
+# Tier A or B regardless of everything else about the trade.
+BOUNCE_DTE_MIN, BOUNCE_DTE_MAX = 60, 100
 BREAKEVEN_MAX_PCT = 3.5
 BREAKEVEN_NEAR_PCT = 5.0
 
@@ -53,7 +59,9 @@ def classify(norm: dict) -> tuple[str, list[str]]:
         failed.append("liquidity")
     if norm["earnings_in_window"]:
         failed.append("earnings")
-    if not (DTE_MIN <= norm["dte_at_entry"] <= DTE_MAX):
+    dte_min = norm.get("dte_min", DTE_MIN)
+    dte_max = norm.get("dte_max", DTE_MAX)
+    if not (dte_min <= norm["dte_at_entry"] <= dte_max):
         failed.append("dte")
     # Magnitude, not signed value: bear put spreads carry a positive
     # breakeven_move_pct meaning "the stock must fall this far".
@@ -112,7 +120,14 @@ def normalise(setup, source: str) -> dict:
         long_strike = setup.strike
         entry_debit = setup.premium
         quality = setup.signal_count
-        detector = None
+        # 200W bounce is a distinct, independently-evaluated setup type (see
+        # technical_scanner._score_200w_bounce) — tagging it lets the
+        # aggregate stats separate its win rate from the 7-signal consensus's,
+        # which is the whole point of tracking it in the first place. Every
+        # other technical setup keeps detector=None ("—" in the UI), matching
+        # existing behaviour.
+        is_bounce = getattr(setup, "setup_type", "consensus") == "200w_bounce"
+        detector = "200w_bounce" if is_bounce else None
         direction = setup.direction
         earnings = bool(setup.earnings_within_dte)
         # `direction` is itself the trend read for this source, so it can never
@@ -122,6 +137,10 @@ def normalise(setup, source: str) -> dict:
         short_occ = setup.short_occ or ""
     else:
         raise ValueError(f"unknown source {source!r}")
+
+    dte_min, dte_max = (BOUNCE_DTE_MIN, BOUNCE_DTE_MAX) if (
+        source == "technical" and getattr(setup, "setup_type", "consensus") == "200w_bounce"
+    ) else (DTE_MIN, DTE_MAX)
 
     # net_debit / premium is the worst-case fill; every mark is mid-to-mid.
     # Carrying the entry mid makes a like-for-like series recoverable later.
@@ -147,6 +166,8 @@ def normalise(setup, source: str) -> dict:
         "direction": direction,
         "expiry": setup.expiry,
         "dte_at_entry": setup.dte,
+        "dte_min": dte_min,
+        "dte_max": dte_max,
         "long_strike": float(long_strike),
         "short_strike": float(short_strike) if short_strike is not None else None,
         "long_occ": long_occ,

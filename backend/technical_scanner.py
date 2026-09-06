@@ -328,7 +328,7 @@ def _construct_long_call(
         probability_of_profit=round(abs(call.delta) * 100),
         order_string=(
             f"BUY +1 {symbol} {call.expiry.strftime('%m/%d')} "
-            f"{call.strike:.0f} CALL @{call.ask:.2f} LMT"
+            f"{call.strike:g} CALL @{call.ask:.2f} LMT"
         ),
         long_leg_oi=oi_l, short_leg_oi=oi_s,
         long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
@@ -396,7 +396,7 @@ def _construct_long_put(
         probability_of_profit=round(abs(put.delta) * 100),
         order_string=(
             f"BUY +1 {symbol} {put.expiry.strftime('%m/%d')} "
-            f"{put.strike:.0f} PUT @{put.ask:.2f} LMT"
+            f"{put.strike:g} PUT @{put.ask:.2f} LMT"
         ),
         long_leg_oi=oi_l, short_leg_oi=oi_s,
         long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
@@ -479,7 +479,7 @@ def _construct_bull_call_spread_technical(
         probability_of_profit=round(abs(long_leg.delta) * 100),
         order_string=(
             f"BUY +1 {symbol} {long_leg.expiry.strftime('%m/%d')} "
-            f"{long_leg.strike:.0f}/{short_leg.strike:.0f} CALL VRT @{net_debit:.2f} LMT"
+            f"{long_leg.strike:g}/{short_leg.strike:g} CALL VRT @{net_debit:.2f} LMT"
         ),
         long_leg_oi=oi_l, short_leg_oi=oi_s,
         long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
@@ -562,7 +562,7 @@ def _construct_bear_put_spread_technical(
         probability_of_profit=round(abs(long_leg.delta) * 100),
         order_string=(
             f"BUY +1 {symbol} {long_leg.expiry.strftime('%m/%d')} "
-            f"{long_leg.strike:.0f}/{short_leg.strike:.0f} PUT VRT @{net_debit:.2f} LMT"
+            f"{long_leg.strike:g}/{short_leg.strike:g} PUT VRT @{net_debit:.2f} LMT"
         ),
         long_leg_oi=oi_l, short_leg_oi=oi_s,
         long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
@@ -658,11 +658,15 @@ def _construct_200w_bounce_long_call(
     since this is a slower thesis with less need to lean on theta-heavy
     leverage. Reuses the same (now sqrt-scaled) ATR price target and the same
     2.0 min-R:R gate as every other technical structure."""
-    candidates = [c for c in chain.calls if 60 <= c.dte <= 100]
-    if not candidates:
-        return None
-    call = min(candidates, key=lambda c: abs(c.delta - 0.65))
-    if call.bid <= 0:
+    # _find_delta_contract, not an inline filter: it excludes bid<=0 / iv<=0
+    # candidates BEFORE the delta comparison. The inline version compared on
+    # delta first and checked bid afterward, so a contract with NaN delta (a
+    # real Schwab response for a dead market) could win outright — min() never
+    # replaces its incumbent against a NaN comparison — and a NaN then reaches
+    # the JSON response, which Starlette rejects (allow_nan=False), 500ing the
+    # whole /technical-setups endpoint rather than just skipping one contract.
+    call = _find_delta_contract(chain.calls, 0.65, dte_min=60, dte_max=100)
+    if call is None:
         return None
 
     dte = call.dte
@@ -823,12 +827,21 @@ def scan_technical_setups(
     bounce_qualifying: list[tuple[str, dict]] = []
     if direction in ("bullish", "both"):
         for batch_idx, batch in enumerate(batches):
+            if batch_idx > 0:
+                import time; time.sleep(1)   # match the daily loop's pacing
             weekly = _download_weekly_batch(batch)
             for symbol, (closes, lows) in weekly.items():
-                facts = _score_200w_bounce(closes, lows)
-                if facts is not None:
-                    logger.info("Technical scan: %s 200W bounce qualifies: %s", symbol, facts)
-                    bounce_qualifying.append((symbol, facts))
+                # This sits between consensus qualification and consensus
+                # option construction below — an unguarded raise here would
+                # discard all the consensus work already done for the whole
+                # scan, not just this symbol's bounce check.
+                try:
+                    facts = _score_200w_bounce(closes, lows)
+                    if facts is not None:
+                        logger.info("Technical scan: %s 200W bounce qualifies: %s", symbol, facts)
+                        bounce_qualifying.append((symbol, facts))
+                except Exception as e:
+                    logger.warning("200W bounce scoring failed for %s: %s", symbol, e)
             gc.collect()
         logger.info("Technical scan: %d/%d symbols qualify for 200W bounce",
                     len(bounce_qualifying), len(symbols))

@@ -123,3 +123,35 @@ def test_entry_mid_is_carried_when_the_setup_has_one():
 def test_entry_mid_is_none_when_not_derivable_never_guessed():
     assert normalise(_trade_setup(), "scanner")["entry_mid"] is None
     assert normalise(_technical_setup(), "technical")["entry_mid"] is None
+
+
+def test_200w_bounce_gets_its_own_detector_tag():
+    # This is what lets aggregate()'s by_detector breakdown answer "does the
+    # 200W bounce actually work" as a question separate from the 7-signal
+    # consensus — without it both land in the same "-" bucket and the
+    # question the forward test exists to answer becomes unanswerable.
+    setup = _technical_setup(setup_type="200w_bounce")
+    n = normalise(setup, "technical")
+    assert n["detector"] == "200w_bounce"
+
+
+def test_consensus_technical_setup_keeps_detector_none():
+    setup = _technical_setup()  # default setup_type="consensus"
+    n = normalise(setup, "technical")
+    assert n["detector"] is None
+
+
+def test_200w_bounce_gets_its_own_dte_band():
+    from forward_test import BOUNCE_DTE_MIN, BOUNCE_DTE_MAX
+    setup = _technical_setup(setup_type="200w_bounce", dte=75)
+    n = normalise(setup, "technical")
+    assert n["dte_min"] == BOUNCE_DTE_MIN
+    assert n["dte_max"] == BOUNCE_DTE_MAX
+
+
+def test_consensus_and_scanner_keep_the_original_dte_band():
+    from forward_test import DTE_MIN, DTE_MAX
+    n_tech = normalise(_technical_setup(), "technical")
+    assert n_tech["dte_min"] == DTE_MIN and n_tech["dte_max"] == DTE_MAX
+    n_scan = normalise(_trade_setup(), "scanner")
+    assert n_scan["dte_min"] == DTE_MIN and n_scan["dte_max"] == DTE_MAX

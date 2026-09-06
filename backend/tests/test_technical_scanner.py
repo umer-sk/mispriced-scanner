@@ -273,3 +273,35 @@ def test_construct_bear_put_spread_technical_price_target():
     from technical_scanner import _atr_price_target
     expected = round(_atr_price_target(875.0, 30.0, setup.dte, bullish=False), 2)
     assert setup.price_target == expected
+
+
+def test_order_string_does_not_round_half_strikes():
+    """f'{87.5:.0f}' silently rounds to '88' — a copy-pasted order for the
+    wrong contract on any $2.50-strike-increment name (AMD, INTC, CSCO, PYPL,
+    ...). All four order_string sites must use a format that preserves it."""
+    chain = _make_chain()
+    # Shift every strike by +0.5 rather than collapsing them to one value —
+    # spread construction needs distinct long/short strikes to have a
+    # positive width.
+    for c in chain.calls + chain.puts:
+        c.strike += 0.5
+    signal_details_bull = {k: True for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
+    signal_details_bear = {k: False for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
+
+    call_setup = _construct_long_call("NVDA", 875.0, chain, 7, signal_details_bull, atr14=30.0)
+    assert call_setup is not None
+    assert call_setup.strike == 900.5
+    assert "900.5" in call_setup.order_string and "901 " not in call_setup.order_string
+
+    put_setup = _construct_long_put("NVDA", 875.0, chain, 7, signal_details_bear, atr14=30.0)
+    assert put_setup is not None
+    assert put_setup.strike == 850.5
+    assert "850.5" in put_setup.order_string
+
+    bull_spread = _construct_bull_call_spread_technical("NVDA", 875.0, chain, 7, signal_details_bull, atr14=30.0)
+    assert bull_spread is not None
+    assert "900.5/950.5" in bull_spread.order_string
+
+    bear_spread = _construct_bear_put_spread_technical("NVDA", 875.0, chain, 7, signal_details_bear, atr14=30.0)
+    assert bear_spread is not None
+    assert "850.5/800.5" in bear_spread.order_string
