@@ -164,7 +164,11 @@ export default function TechnicalSetups() {
   const idleTimerRef = useRef(null)
   const [error, setError] = useState(null)
   const [scanTimestamp, setScanTimestamp] = useState(null)
-  const [filters, setFilters] = useState({ direction: 'both', minRR: 2.0, sort: 'rr' })
+  // 1.5, not 2.0: every non-bounce structure already enforces its own
+  // >= 2.0 gate server-side, so this default changes nothing for them —
+  // it only stops silently hiding a 200W bounce setup that already cleared
+  // its own, separately-calibrated 1.5 bar.
+  const [filters, setFilters] = useState({ direction: 'both', minRR: 1.5, sort: 'rr' })
 
   function clearAllTimers() {
     clearInterval(pollRef.current)

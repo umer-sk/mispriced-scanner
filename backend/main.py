@@ -284,8 +284,15 @@ async def _run_technical_scan() -> None:
         logger.info("Starting technical scan of %d symbols", len(QQQ_TOP50))
         try:
             loop = asyncio.get_running_loop()
+            # 1.5, not 2.0: every non-bounce constructor already enforces its
+            # own >= 2.0 gate internally (scan_technical_setups.py), so no
+            # spread/long-call/long-put setup can ever have rr in [1.5, 2.0)
+            # regardless of this value — lowering it changes nothing for them.
+            # It matters only for the 200W bounce, whose own calibrated gate
+            # is BOUNCE_RR_MIN=1.5; passing 2.0 here would silently drop a
+            # qualifying bounce setup before it ever reached the cache.
             setups = await loop.run_in_executor(
-                None, scan_technical_setups, QQQ_TOP50, 2.0, "both"
+                None, scan_technical_setups, QQQ_TOP50, 1.5, "both"
             )
             if not setups:
                 _record_scan_note("technical", "0 setups — cached results kept")
@@ -470,7 +477,8 @@ async def trigger_sector_scan(request: Request, background_tasks: BackgroundTask
 async def get_technical_setups(
     request: Request,
     direction: str = "both",
-    min_rr: float = 2.0,
+    # 1.5, not 2.0 — see the comment at _run_technical_scan's call site.
+    min_rr: float = 1.5,
     sort: str = "rr",
 ):
     setups = _cache["technical_setups"]

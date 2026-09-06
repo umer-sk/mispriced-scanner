@@ -472,3 +472,58 @@ def test_all_three_single_leg_constructors_delegate_to_single_leg_reward():
     expected = round(_single_leg_reward(875.0, put.strike, put_setup.dte, put.iv,
                                         put_setup.price_target, put.ask, is_put=True), 2)
     assert put_setup.rr_ratio == expected
+
+
+# ─── min_rr cascade: three places must all use BOUNCE_RR_MIN's default, not 2.0 ──
+# _construct_200w_bounce_long_call's own gate (1.5) is useless if the SCAN's
+# outer min_rr filter (main.py:288), the /technical-setups endpoint's default,
+# or the frontend's initial filter state independently re-apply 2.0 on top of
+# it. Each layer is checked directly rather than via a full mocked scan, since
+# constructing a qualifying weekly bounce series through the whole pipeline
+# adds a lot of fixture machinery for what is fundamentally a "is the right
+# constant wired to the right place" question.
+
+def test_run_technical_scan_calls_scan_with_bounce_rr_min_not_2_0():
+    """main.py:288's call site. A caller passing the shared 2.0 default would
+    silently drop every qualifying bounce setup (rr in [1.5, 2.0)) before it
+    ever reached the cache — fixing the constructor's own gate alone does
+    nothing if this outer value overrides it first."""
+    import importlib
+    import inspect
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    # main.py imports schwab_client at module load, which needs Schwab env
+    # vars; conftest.py already sets placeholders for exactly this reason.
+    for name in ("yfinance", "supabase"):
+        if name not in sys.modules:
+            m = MagicMock()
+            m.__spec__ = types.SimpleNamespace(name=name)
+            sys.modules[name] = m
+    main = importlib.import_module("main")
+    src = inspect.getsource(main._run_technical_scan)
+    assert "scan_technical_setups, QQQ_TOP50, 1.5" in src, (
+        "expected main.py to call scan_technical_setups with min_rr=1.5 "
+        "(BOUNCE_RR_MIN), found different source:\n" + src
+    )
+
+
+def test_technical_setups_endpoint_default_min_rr_is_1_5_not_2_0():
+    """The /technical-setups read-time filter. Even if the scan stores a
+    rr=1.8 bounce setup, a caller relying on the endpoint's default would
+    still have it filtered back out at read time if this default were 2.0."""
+    import importlib
+    import inspect
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    for name in ("yfinance", "supabase"):
+        if name not in sys.modules:
+            m = MagicMock()
+            m.__spec__ = types.SimpleNamespace(name=name)
+            sys.modules[name] = m
+    main = importlib.import_module("main")
+    sig = inspect.signature(main.get_technical_setups)
+    assert sig.parameters["min_rr"].default == 1.5

@@ -122,6 +122,23 @@ MA_200W_TOUCH_LOOKBACK = 8    # weeks to look back for a touch of the level
 MA_200W_TOUCH_TOLERANCE_PCT = 4.0   # weekly low within this % of (or below) the MA counts as a touch
 MA_200W_MAX_EXTENSION_PCT = 10.0    # current close must be within this % above the MA
 
+# The bounce's structure (0.65 delta, 60-100 DTE) needs a much larger ATR/IV
+# divergence than the 0.45-delta consensus structures do to clear the same
+# rr threshold, because a deeper-ITM, longer-dated call has less convexity
+# per dollar of premium. The shared RR_MIN=2.0 gate needs ~2.0-2.4x realized
+# vs implied ATR here (vs ~1.5-1.8x for the consensus structures) — a bar
+# never once reached across a 16-name QQQ sample (max observed 1.81x under
+# generous zero-variance-risk-premium assumptions). At that gate this setup
+# cannot fire under any normal market condition, not just rarely.
+#
+# BOUNCE_RR_MIN=1.5 was chosen to need the SAME real-world difficulty as the
+# existing, working 2.0 gate: verified numerically to require ~1.55-1.88x
+# across DTE 60-100 and IV 25-90%, matching the consensus gate's ~1.67-1.78x
+# band almost exactly. Still requires genuine edge (mu=0 always gives exactly
+# rr=0 — see _single_leg_reward), just calibrated to this structure rather
+# than reusing a threshold verified only for a different one.
+BOUNCE_RR_MIN = 1.5
+
 
 def _score_200w_bounce(weekly_closes: list[float], weekly_lows: list[float]) -> Optional[dict]:
     """Detect a bounce off a rising 200-week moving average.
@@ -741,7 +758,9 @@ def _construct_200w_bounce_long_call(
     rr_ratio = round(_single_leg_reward(
         stock_price, call.strike, dte, call.iv, price_target, call.ask, is_put=False,
     ), 2)
-    if rr_ratio < 2.0:
+    # BOUNCE_RR_MIN, not the shared 2.0 used by every other structure — see
+    # its definition for why this structure needs its own, calibrated bar.
+    if rr_ratio < BOUNCE_RR_MIN:
         return None
 
     breakeven = call.strike + call.ask

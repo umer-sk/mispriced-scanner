@@ -300,3 +300,24 @@ def test_200w_construct_delegates_to_single_leg_reward():
     setup = _construct_200w_bounce_long_call("TEST", 100.0, chain, _FACTS, atr14=10.0)
     assert setup is not None
     assert setup.rr_ratio == 2.12
+
+
+def test_bounce_rr_min_is_calibrated_not_2_0():
+    """Guards against silent drift back to the shared 2.0 gate. See
+    BOUNCE_RR_MIN's definition in technical_scanner.py for the calibration:
+    this structure (0.65 delta, 60-100 DTE) needs a much larger ATR/IV
+    divergence than the 0.45-delta consensus structures to clear the same
+    threshold, and 2.0 was verified unreachable across a 16-name QQQ sample."""
+    from technical_scanner import BOUNCE_RR_MIN
+    assert BOUNCE_RR_MIN == 1.5
+
+
+def test_200w_construct_accepts_rr_between_calibrated_min_and_the_shared_2_0_gate():
+    """The whole point of BOUNCE_RR_MIN: a setup with rr=1.89 must be
+    constructed successfully, even though the shared 2.0 gate used by every
+    other structure would reject it. iv=0.70/atr14=9.5 verified to land at
+    rr=1.890 for this chain's 85-strike/$19-ask contract."""
+    chain = _bounce_chain(iv=0.70)
+    setup = _construct_200w_bounce_long_call("TEST", 100.0, chain, _FACTS, atr14=9.5)
+    assert setup is not None
+    assert 1.5 <= setup.rr_ratio < 2.0
