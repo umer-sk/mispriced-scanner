@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import ft_store
 from schwab_client import fetch_quotes
+from technical_scanner import BOUNCE_RR_MIN
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,13 @@ DTE_MIN, DTE_MAX = 25, 45
 # fails the "dte" gate unconditionally and permanently — it can never be
 # Tier A or B regardless of everything else about the trade.
 BOUNCE_DTE_MIN, BOUNCE_DTE_MAX = 60, 100
+# The bounce is also gated at construction on its own, separately-calibrated
+# BOUNCE_RR_MIN (1.5, not the shared 2.0) — see technical_scanner.py for the
+# calibration reasoning. Without this override every bounce position (rr
+# typically 1.5-2.0) fails the "rr" gate here unconditionally, and since "rr"
+# is not in NEAR_MISS_GATES that means permanent Tier C regardless of
+# everything else about the trade — the same failure mode the DTE override
+# above exists to prevent, just on a different gate.
 BREAKEVEN_MAX_PCT = 3.5
 BREAKEVEN_NEAR_PCT = 5.0
 
@@ -51,7 +59,8 @@ def classify(norm: dict) -> tuple[str, list[str]]:
 
     if norm["quality"] < QUALITY_MIN[source]:
         failed.append("quality")
-    if norm["rr_ratio"] < RR_MIN:
+    rr_min = norm.get("rr_min", RR_MIN)
+    if norm["rr_ratio"] < rr_min:
         failed.append("rr")
     if not norm["liquidity_ok"] or \
             norm["long_leg_spread_pct"] > SPREAD_MAX_PCT or \
@@ -138,9 +147,11 @@ def normalise(setup, source: str) -> dict:
     else:
         raise ValueError(f"unknown source {source!r}")
 
-    dte_min, dte_max = (BOUNCE_DTE_MIN, BOUNCE_DTE_MAX) if (
+    is_bounce_setup = (
         source == "technical" and getattr(setup, "setup_type", "consensus") == "200w_bounce"
-    ) else (DTE_MIN, DTE_MAX)
+    )
+    dte_min, dte_max = (BOUNCE_DTE_MIN, BOUNCE_DTE_MAX) if is_bounce_setup else (DTE_MIN, DTE_MAX)
+    rr_min = BOUNCE_RR_MIN if is_bounce_setup else RR_MIN
 
     # net_debit / premium is the worst-case fill; every mark is mid-to-mid.
     # Carrying the entry mid makes a like-for-like series recoverable later.
@@ -168,6 +179,7 @@ def normalise(setup, source: str) -> dict:
         "dte_at_entry": setup.dte,
         "dte_min": dte_min,
         "dte_max": dte_max,
+        "rr_min": rr_min,
         "long_strike": float(long_strike),
         "short_strike": float(short_strike) if short_strike is not None else None,
         "long_occ": long_occ,

@@ -225,3 +225,20 @@ def test_dte_gate_falls_back_to_the_default_band_without_the_override():
     tier, failed = classify(_base(dte_at_entry=75))
     assert tier == "C"
     assert "dte" in failed
+
+
+def test_rr_gate_uses_the_bounce_minimum_when_present():
+    # A normalised bounce dict carries rr_min=1.5 (BOUNCE_RR_MIN), not the
+    # shared 2.0 — the bounce's own construction gate is calibrated to 1.5
+    # (technical_scanner.BOUNCE_RR_MIN). rr=1.72 would fail the shared 2.0
+    # gate but must pass here — without this override every 200W bounce
+    # position is permanently Tier C, since "rr" carries no near-miss band.
+    tier, failed = classify(_base(rr_ratio=1.72, rr_min=1.5))
+    assert tier == "A"
+    assert "rr" not in failed
+
+
+def test_rr_gate_falls_back_to_the_default_minimum_without_the_override():
+    tier, failed = classify(_base(rr_ratio=1.72))
+    assert tier == "C"
+    assert "rr" in failed

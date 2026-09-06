@@ -821,7 +821,7 @@ def _download_qqq() -> pd.DataFrame:
 
 def scan_technical_setups(
     symbols: list[str],
-    min_rr: float = 2.0,
+    min_rr: float = BOUNCE_RR_MIN,
     direction: str = "both",
 ) -> list[TechnicalSetup]:
     """

@@ -35,7 +35,12 @@ export async function fetchHealth() {
 export async function fetchTechnicalSetups(filters = {}) {
   const params = new URLSearchParams({
     direction: filters.direction ?? 'both',
-    min_rr:    filters.minRR     ?? 2.0,
+    // 1.5, not 2.0 — matches the backend's BOUNCE_RR_MIN default
+    // (technical_scanner.py); all 3 call sites pass full `filters` today so
+    // this fallback is currently dead, but it should still agree with the
+    // backend rather than silently filter out qualifying bounce setups if
+    // that ever changes.
+    min_rr:    filters.minRR     ?? 1.5,
     sort:      filters.sort      ?? 'rr',
   })
   const res = await fetch(`${BASE_URL}/technical-setups?${params}`)

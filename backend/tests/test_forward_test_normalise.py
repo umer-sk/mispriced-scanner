@@ -155,3 +155,22 @@ def test_consensus_and_scanner_keep_the_original_dte_band():
     assert n_tech["dte_min"] == DTE_MIN and n_tech["dte_max"] == DTE_MAX
     n_scan = normalise(_trade_setup(), "scanner")
     assert n_scan["dte_min"] == DTE_MIN and n_scan["dte_max"] == DTE_MAX
+
+
+def test_200w_bounce_gets_its_own_rr_minimum():
+    # Mirrors the DTE override above, on the gate the 3rd review found still
+    # missing one: without it, every bounce position (rr typically 1.5-2.0)
+    # fails the shared RR_MIN=2.0 gate unconditionally, and since "rr" has no
+    # near-miss band that means permanent Tier C regardless of the trade.
+    from forward_test import BOUNCE_RR_MIN
+    setup = _technical_setup(setup_type="200w_bounce")
+    n = normalise(setup, "technical")
+    assert n["rr_min"] == BOUNCE_RR_MIN
+
+
+def test_consensus_and_scanner_keep_the_original_rr_minimum():
+    from forward_test import RR_MIN
+    n_tech = normalise(_technical_setup(), "technical")
+    assert n_tech["rr_min"] == RR_MIN
+    n_scan = normalise(_trade_setup(), "scanner")
+    assert n_scan["rr_min"] == RR_MIN

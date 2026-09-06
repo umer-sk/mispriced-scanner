@@ -1,7 +1,7 @@
 # backend/tests/test_technical_scanner.py
 import pandas as pd
 import numpy as np
-from technical_scanner import _ema, _rsi, _atr14, score_signals
+from technical_scanner import _ema, _rsi, _atr14, score_signals, BOUNCE_RR_MIN
 from models import TechnicalSetup
 from datetime import date
 
@@ -483,13 +483,8 @@ def test_all_three_single_leg_constructors_delegate_to_single_leg_reward():
 # adds a lot of fixture machinery for what is fundamentally a "is the right
 # constant wired to the right place" question.
 
-def test_run_technical_scan_calls_scan_with_bounce_rr_min_not_2_0():
-    """main.py:288's call site. A caller passing the shared 2.0 default would
-    silently drop every qualifying bounce setup (rr in [1.5, 2.0)) before it
-    ever reached the cache — fixing the constructor's own gate alone does
-    nothing if this outer value overrides it first."""
+def _import_main():
     import importlib
-    import inspect
     import sys
     import types
     from unittest.mock import MagicMock
@@ -501,29 +496,34 @@ def test_run_technical_scan_calls_scan_with_bounce_rr_min_not_2_0():
             m = MagicMock()
             m.__spec__ = types.SimpleNamespace(name=name)
             sys.modules[name] = m
-    main = importlib.import_module("main")
-    src = inspect.getsource(main._run_technical_scan)
-    assert "scan_technical_setups, QQQ_TOP50, 1.5" in src, (
-        "expected main.py to call scan_technical_setups with min_rr=1.5 "
-        "(BOUNCE_RR_MIN), found different source:\n" + src
-    )
+    return importlib.import_module("main")
 
 
-def test_technical_setups_endpoint_default_min_rr_is_1_5_not_2_0():
+def test_run_technical_scan_calls_scan_with_bounce_rr_min_not_2_0(monkeypatch):
+    """main.py:288's call site. A caller passing the shared 2.0 default would
+    silently drop every qualifying bounce setup (rr in [BOUNCE_RR_MIN, 2.0))
+    before it ever reached the cache — fixing the constructor's own gate
+    alone does nothing if this outer value overrides it first."""
+    import asyncio
+
+    main = _import_main()
+    captured = {}
+
+    def fake_scan(symbols, min_rr, direction):
+        captured["min_rr"] = min_rr
+        return []
+
+    monkeypatch.setattr(main, "scan_technical_setups", fake_scan)
+    asyncio.run(main._run_technical_scan())
+    assert captured["min_rr"] == BOUNCE_RR_MIN
+
+
+def test_technical_setups_endpoint_default_min_rr_is_bounce_rr_min_not_2_0():
     """The /technical-setups read-time filter. Even if the scan stores a
     rr=1.8 bounce setup, a caller relying on the endpoint's default would
     still have it filtered back out at read time if this default were 2.0."""
-    import importlib
     import inspect
-    import sys
-    import types
-    from unittest.mock import MagicMock
 
-    for name in ("yfinance", "supabase"):
-        if name not in sys.modules:
-            m = MagicMock()
-            m.__spec__ = types.SimpleNamespace(name=name)
-            sys.modules[name] = m
-    main = importlib.import_module("main")
+    main = _import_main()
     sig = inspect.signature(main.get_technical_setups)
-    assert sig.parameters["min_rr"].default == 1.5
+    assert sig.parameters["min_rr"].default == BOUNCE_RR_MIN
