@@ -295,7 +295,7 @@ export default function TechnicalSetups() {
           ))}
         </div>
         <div style={styles.filterGroup}>
-          <span style={styles.filterLabel} title="Minimum risk-to-reward ratio — e.g. 2.0 means max gain is at least 2× the premium paid">MIN R:R</span>
+          <span style={styles.filterLabel} title="Minimum risk-to-reward ratio. For spreads: max gain ÷ max loss. For long calls/puts (including 200W bounces): expected payoff ÷ premium, where expected payoff accounts for the full range of outcomes, not just one price target.">MIN R:R</span>
           <input
             type="range" min="1.0" max="5.0" step="0.5"
             value={filters.minRR}

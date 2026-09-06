@@ -12,6 +12,7 @@ from typing import Optional
 
 import pandas as pd
 import yfinance as yf
+from scipy.stats import norm
 
 from models import OptionChainData, TechnicalSetup
 from occ import build_occ
@@ -22,6 +23,58 @@ except Exception:
     fetch_option_chain = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+def _expected_option_value(S: float, K: float, T: float, sigma: float, mu: float, is_put: bool) -> float:
+    """E[payoff] of a European option at expiry, undiscounted, where the
+    underlying is lognormal with E[S_T] = S * exp(mu*T) and volatility sigma.
+
+    This is the actuarial ("real-world") expectation, not a risk-neutral
+    price: same closed form as Black-Scholes with r -> mu and no discounting,
+    since we want expected P&L at the horizon, not a present value.
+
+    Why this replaces "intrinsic value at one point target": that approach
+    throws away the whole probability distribution above (for a call) or
+    below (for a put) the target, which is exactly where a long option's
+    convexity pays off. It also cannot distinguish a setup with real edge
+    from one with none — a flat, no-edge forecast (mu=0) still shows a
+    positive number under intrinsic-at-target once the target sits far
+    enough out, because the point-target model has no way to express "on
+    average, nothing happens." Under this formula, mu=0 always gives exactly
+    the option's own fair value at that vol, and expected_gain = 0.
+    """
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return max(0.0, K - S) if is_put else max(0.0, S - K)
+    d1 = (math.log(S / K) + (mu + sigma**2 / 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    forward = S * math.exp(mu * T)
+    if is_put:
+        return K * norm.cdf(-d2) - forward * norm.cdf(-d1)
+    return forward * norm.cdf(d1) - K * norm.cdf(d2)
+
+
+def _single_leg_reward(
+    stock_price: float, strike: float, dte: int, iv: float,
+    price_target: float, premium: float, is_put: bool,
+) -> float:
+    """Expected-value R:R for a single-leg long option (see
+    _expected_option_value for why intrinsic-at-a-point is the wrong metric).
+
+    `price_target` supplies the drift assumption via mu = ln(target/S)/T —
+    the SAME ATR-based target already computed for display, so this is not a
+    second, independent forecast; it is the existing one evaluated properly
+    across the whole outcome distribution instead of at one point. sigma is
+    the CONTRACT'S OWN IV: this deliberately measures whether the technical
+    signal's implied move is large relative to what the option's own pricing
+    assumes, not whether IV itself is rich or cheap (that question belongs to
+    scanner.py's iv_rank/skew detectors, not this momentum-based scanner).
+    """
+    if iv <= 0 or dte <= 0 or premium <= 0 or stock_price <= 0:
+        return 0.0
+    T = dte / 365.0
+    mu = math.log(price_target / stock_price) / T
+    ev_payoff = _expected_option_value(stock_price, strike, T, iv, mu, is_put)
+    return (ev_payoff - premium) / premium
 
 
 def _atr_price_target(stock_price: float, atr14: float, dte: int, bullish: bool) -> float:
@@ -278,19 +331,17 @@ def _construct_long_call(
     signal_details: dict,
     atr14: float,
 ) -> Optional[TechnicalSetup]:
-    """Long call at ~0.45 delta, 30–60 DTE. R:R via ATR-based price target."""
+    """Long call at ~0.45 delta, 30–60 DTE. R:R via _single_leg_reward's
+    expected-payoff model, using the ATR target as the drift assumption."""
     call = _find_delta_contract(chain.calls, 0.45)
     if call is None:
         return None
 
     dte = call.dte
     price_target = _atr_price_target(stock_price, atr14, dte, bullish=True)
-    intrinsic_at_target = max(0.0, price_target - call.strike)
-    gain_at_target = intrinsic_at_target - call.ask
-    if gain_at_target <= 0:
-        return None
-
-    rr_ratio = round(gain_at_target / call.ask, 2)
+    rr_ratio = round(_single_leg_reward(
+        stock_price, call.strike, dte, call.iv, price_target, call.ask, is_put=False,
+    ), 2)
     if rr_ratio < 2.0:
         return None
 
@@ -346,19 +397,17 @@ def _construct_long_put(
     signal_details: dict,
     atr14: float,
 ) -> Optional[TechnicalSetup]:
-    """Long put at ~0.45 delta (abs), 30–60 DTE. R:R via ATR-based price target."""
+    """Long put at ~0.45 delta (abs), 30–60 DTE. R:R via _single_leg_reward's
+    expected-payoff model, using the ATR target as the drift assumption."""
     put = _find_delta_contract(chain.puts, 0.45)
     if put is None:
         return None
 
     dte = put.dte
     price_target = _atr_price_target(stock_price, atr14, dte, bullish=False)
-    intrinsic_at_target = max(0.0, put.strike - price_target)
-    gain_at_target = intrinsic_at_target - put.ask
-    if gain_at_target <= 0:
-        return None
-
-    rr_ratio = round(gain_at_target / put.ask, 2)
+    rr_ratio = round(_single_leg_reward(
+        stock_price, put.strike, dte, put.iv, price_target, put.ask, is_put=True,
+    ), 2)
     if rr_ratio < 2.0:
         return None
 
@@ -656,8 +705,9 @@ def _construct_200w_bounce_long_call(
     """Long call for a 200W MA bounce: deeper ITM and longer-dated than the
     consensus long call (0.65 delta / 60-100 DTE vs 0.45 delta / 30-60 DTE),
     since this is a slower thesis with less need to lean on theta-heavy
-    leverage. Reuses the same (now sqrt-scaled) ATR price target and the same
-    2.0 min-R:R gate as every other technical structure."""
+    leverage. R:R via _single_leg_reward (see that function) — the sqrt-scaled
+    ATR target supplies the drift, but the reward is the full expected payoff
+    across the distribution, not intrinsic value at one point."""
     # _find_delta_contract, not an inline filter: it excludes bid<=0 / iv<=0
     # candidates BEFORE the delta comparison. The inline version compared on
     # delta first and checked bid afterward, so a contract with NaN delta (a
@@ -671,12 +721,9 @@ def _construct_200w_bounce_long_call(
 
     dte = call.dte
     price_target = _atr_price_target(stock_price, atr14, dte, bullish=True)
-    intrinsic_at_target = max(0.0, price_target - call.strike)
-    gain_at_target = intrinsic_at_target - call.ask
-    if gain_at_target <= 0:
-        return None
-
-    rr_ratio = round(gain_at_target / call.ask, 2)
+    rr_ratio = round(_single_leg_reward(
+        stock_price, call.strike, dte, call.iv, price_target, call.ask, is_put=False,
+    ), 2)
     if rr_ratio < 2.0:
         return None
 

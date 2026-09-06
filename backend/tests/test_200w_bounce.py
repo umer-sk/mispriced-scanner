@@ -199,13 +199,13 @@ from models import OptionChainData, OptionContract
 from technical_scanner import _construct_200w_bounce_long_call
 
 
-def _bounce_chain(price=100.0, iv_rank=40.0):
+def _bounce_chain(price=100.0, iv_rank=40.0, iv=0.30):
     expiry = date(2026, 12, 18)  # ~75 DTE from a nominal test "today"
     def _call(strike, delta, ask, bid=None, dte=75, oi=1000):
         return OptionContract(
             strike=strike, expiry=expiry, dte=dte, bid=bid or round(ask * 0.96, 2),
             ask=ask, mid=round(ask * 0.98, 2), last=ask, volume=300, open_interest=oi,
-            iv=0.30, delta=delta, gamma=0.01, theta=-0.03, vega=0.20,
+            iv=iv, delta=delta, gamma=0.01, theta=-0.03, vega=0.20,
             theoretical_value=ask, in_the_money=(delta > 0.5),
         )
     return OptionChainData(
@@ -274,3 +274,24 @@ def test_200w_construct_price_target_uses_the_shared_sqrt_helper():
     assert setup is not None
     expected = round(_atr_price_target(100.0, 15.0, setup.dte, bullish=True), 2)
     assert setup.price_target == expected
+
+
+def test_200w_construct_delegates_to_single_leg_reward():
+    """Mutation guard for the reward-model swap.
+
+    The default _bounce_chain() fixture (iv=0.30, atr14=15) turned out to be
+    a bad discriminator: with a target that far above the strike relative to
+    that IV, N(d1) and N(d2) in the EV formula both saturate to 1.0 in float
+    precision, at which point EV[payoff] = target - K EXACTLY — identical to
+    intrinsic-at-target, not just numerically close. A reversion to the old
+    formula would be invisible there even to an independent recomputation.
+
+    iv=1.00/atr14=10.0 sits in a regime verified NOT to saturate: the old
+    model gives rr=1.952 (fails the >=2.0 gate, no setup), the new model
+    gives rr=2.122 (passes) — the two models disagree on whether a setup
+    exists at all, which a reversion cannot survive.
+    """
+    chain = _bounce_chain(iv=1.00)
+    setup = _construct_200w_bounce_long_call("TEST", 100.0, chain, _FACTS, atr14=10.0)
+    assert setup is not None
+    assert setup.rr_ratio == 2.12
