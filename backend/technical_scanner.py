@@ -68,8 +68,25 @@ def _single_leg_reward(
     signal's implied move is large relative to what the option's own pricing
     assumes, not whether IV itself is rich or cheap (that question belongs to
     scanner.py's iv_rank/skew detectors, not this momentum-based scanner).
+
+    Note: mu=0 gives EXACTLY rr=0 only when `premium` equals the option's
+    theoretical fair value at (sigma, r=0). In production `premium` is the
+    real market ask, which differs from that fair value (bid/ask spread,
+    r>0 in the real pricing model, skew) — so a genuinely no-edge input
+    gives rr close to but not exactly 0 (verified: roughly -0.07 to +0.04 at
+    typical spreads/rates). Harmless against a 2.0 gate, but "exactly 0" is
+    a property of _expected_option_value in isolation, not of this function
+    fed real market data.
     """
-    if iv <= 0 or dte <= 0 or premium <= 0 or stock_price <= 0:
+    # price_target <= 0 is reachable in production: _atr_price_target's
+    # bearish branch is `stock_price - 1.5*atr14*sqrt(dte/10)`, which goes
+    # negative once atr14 exceeds roughly 21-38% of price (dte-dependent) — a
+    # single bad yfinance bar (e.g. an unadjusted split) can inflate ATR14
+    # that far. math.log() on a non-positive argument raises ValueError,
+    # which _pick_best_structure's `long_fn(*args) or spread_fn(*args)` does
+    # not catch, so a put's bad ATR previously took the whole symbol's bear
+    # spread down with it too, not just the long put.
+    if iv <= 0 or dte <= 0 or premium <= 0 or stock_price <= 0 or price_target <= 0:
         return 0.0
     T = dte / 365.0
     mu = math.log(price_target / stock_price) / T

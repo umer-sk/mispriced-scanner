@@ -407,6 +407,25 @@ def test_degenerate_inputs_return_zero_not_a_crash():
     assert _single_leg_reward(100.0, 100.0, 45, 0.4, 105.0, 0.0, is_put=False) == 0.0
 
 
+def test_negative_price_target_returns_zero_not_a_crash():
+    """Reproduces a real crash: math.log() on a non-positive price_target
+    raises ValueError. _atr_price_target's bearish branch goes negative once
+    atr14 exceeds ~21-38% of price (dte-dependent) — reachable from a single
+    bad yfinance bar (e.g. an unadjusted stock split inflating the 14-day
+    average true range). _pick_best_structure's `long_fn(*args) or
+    spread_fn(*args)` does not catch a raise from long_fn, so this silently
+    took the symbol's bear put spread down too, not just the long put."""
+    from technical_scanner import _atr_price_target, _single_leg_reward
+    target = _atr_price_target(875.0, 300.0, 45, bullish=False)
+    assert target < 0   # confirms this scenario is real, not hypothetical
+    assert _single_leg_reward(875.0, 850.0, 45, 0.35, target, 19.0, is_put=True) == 0.0
+
+
+def test_zero_price_target_returns_zero_not_a_crash():
+    from technical_scanner import _single_leg_reward
+    assert _single_leg_reward(100.0, 100.0, 45, 0.4, 0.0, 5.0, is_put=False) == 0.0
+
+
 def test_construct_long_call_no_longer_uses_intrinsic_at_target():
     """Mutation guard: reverting to gain=(intrinsic_at_target - ask)/ask must
     fail this — the two models diverge sharply at this fixture's atr14=30."""

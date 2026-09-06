@@ -280,16 +280,21 @@ def test_200w_construct_delegates_to_single_leg_reward():
     """Mutation guard for the reward-model swap.
 
     The default _bounce_chain() fixture (iv=0.30, atr14=15) turned out to be
-    a bad discriminator: with a target that far above the strike relative to
-    that IV, N(d1) and N(d2) in the EV formula both saturate to 1.0 in float
-    precision, at which point EV[payoff] = target - K EXACTLY — identical to
-    intrinsic-at-target, not just numerically close. A reversion to the old
-    formula would be invisible there even to an independent recomputation.
+    a bad discriminator. Diagnosed initially (wrongly) as float saturation of
+    N(d1)/N(d2) to exactly 1.0 — checked properly: N(d1)=0.99999918,
+    N(d2)=0.99999840, and EV differs from the old intrinsic-at-target value
+    by 3.6e-6 on a $19 premium. Neither cdf saturates; the two models are
+    merely close enough that rr_ratio's 2-decimal rounding collapses the
+    difference (2.1e-7 in rr terms) — a rounding collision, not saturation.
+    Confirmed this region is unreachable from realistic scanner inputs
+    regardless (true saturation needs target/strike ratios no real ATR/IV
+    combination produces), so it does not affect production either way — it
+    just made this specific fixture a bad discriminator for THIS test.
 
-    iv=1.00/atr14=10.0 sits in a regime verified NOT to saturate: the old
-    model gives rr=1.952 (fails the >=2.0 gate, no setup), the new model
-    gives rr=2.122 (passes) — the two models disagree on whether a setup
-    exists at all, which a reversion cannot survive.
+    iv=1.00/atr14=10.0 sits in a regime verified to diverge well past
+    rounding: the old model gives rr=1.952 (fails the >=2.0 gate, no setup),
+    the new model gives rr=2.122 (passes) — the two models disagree on
+    whether a setup exists at all, which a reversion cannot survive.
     """
     chain = _bounce_chain(iv=1.00)
     setup = _construct_200w_bounce_long_call("TEST", 100.0, chain, _FACTS, atr14=10.0)
