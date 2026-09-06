@@ -261,3 +261,7 @@ class TechnicalSetup:
     short_occ: str = ""
     # See TradeSetup.entry_mid — `premium` is the worst-case fill, this is mid.
     entry_mid: Optional[float] = None
+    # 'consensus' (the 7-signal score) or '200w_bounce' (independent of it —
+    # see technical_scanner._score_200w_bounce). The frontend renders each
+    # with a different badge/fact panel; signal_details' shape differs too.
+    setup_type: str = "consensus"

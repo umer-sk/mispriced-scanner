@@ -6,6 +6,7 @@ Stocks with 5+/7 signals agreeing on direction proceed to options structure sele
 """
 import gc
 import logging
+import math
 from datetime import date, datetime
 from typing import Optional
 
@@ -21,6 +22,94 @@ except Exception:
     fetch_option_chain = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+def _atr_price_target(stock_price: float, atr14: float, dte: int, bullish: bool) -> float:
+    """Project a price target `dte` days out from a 14-day ATR.
+
+    Price diffusion scales with sqrt(time), not time itself. The original
+    formula used `dte / 10` linearly, so at 41 DTE it projected ~4.1x ATR of
+    movement where the correct scaling is ~2.0x — a real difference, not
+    rounding: R:R is computed FROM this target and is both the accept gate
+    (>= 2.0) and the sort key, so the inflated target was what put setups on
+    the page and ranked them. Preserves the original "1.5 ATR over 10
+    trading days" calibration at dte=10, where sqrt(10/10) == 10/10 == 1.
+    """
+    move = 1.5 * atr14 * math.sqrt(dte / 10)
+    return stock_price + move if bullish else stock_price - move
+
+
+# ---------------------------------------------------------------------------
+# 200-week MA bounce — a standalone, high-conviction setup independent of the
+# 7-signal consensus above. See docs/superpowers/specs — this fires when a
+# long-term uptrend corrects hard enough to test its RISING 200-week moving
+# average and reclaims it, not merely when price is near any 200W level.
+# ---------------------------------------------------------------------------
+
+MA_200W_PERIOD = 200          # weeks
+MA_200W_SLOPE_LOOKBACK = 10   # weeks back to compare the MA against, for slope
+MA_200W_TOUCH_LOOKBACK = 8    # weeks to look back for a touch of the level
+MA_200W_TOUCH_TOLERANCE_PCT = 4.0   # weekly low within this % of (or below) the MA counts as a touch
+MA_200W_MAX_EXTENSION_PCT = 10.0    # current close must be within this % above the MA
+
+
+def _score_200w_bounce(weekly_closes: list[float], weekly_lows: list[float]) -> Optional[dict]:
+    """Detect a bounce off a rising 200-week moving average.
+
+    All four must hold:
+      1. The 200W SMA itself is rising (vs MA_200W_SLOPE_LOOKBACK weeks ago) —
+         excludes long-term downtrends, where "bounce off the average" isn't
+         the same setup as a correction within an uptrend.
+      2. Within the last MA_200W_TOUCH_LOOKBACK weeks, a weekly LOW came
+         within MA_200W_TOUCH_TOLERANCE_PCT of the MA (or pierced it).
+      3. The most recent weekly CLOSE has reclaimed back above the MA.
+      4. Current price is not already more than MA_200W_MAX_EXTENSION_PCT
+         above the MA — an entry, not a retrospective observation.
+
+    `weekly_closes` and `weekly_lows` must be the same length, oldest first.
+    Returns None when there isn't enough history or the setup doesn't qualify;
+    otherwise a dict of the facts that qualified it (for signal_details).
+    """
+    needed = MA_200W_PERIOD + MA_200W_SLOPE_LOOKBACK
+    if len(weekly_closes) < needed or len(weekly_lows) < needed:
+        return None
+
+    def _sma200_ending_at(idx: int) -> float:
+        window = weekly_closes[idx - MA_200W_PERIOD + 1: idx + 1]
+        return sum(window) / len(window)
+
+    last = len(weekly_closes) - 1
+    ma_now = _sma200_ending_at(last)
+    ma_then = _sma200_ending_at(last - MA_200W_SLOPE_LOOKBACK)
+    if ma_now <= 0 or ma_then <= 0:
+        return None
+
+    ma_slope_pct = round((ma_now - ma_then) / ma_then * 100, 2)
+    if ma_slope_pct <= 0:
+        return None   # criterion 1: MA must be rising
+
+    price_now = weekly_closes[last]
+    if price_now <= ma_now:
+        return None   # criterion 3: must have reclaimed, not still be under it
+
+    extension_pct = round((price_now - ma_now) / ma_now * 100, 2)
+    if extension_pct > MA_200W_MAX_EXTENSION_PCT:
+        return None   # criterion 4: too far past the level to be an entry
+
+    touch_window = weekly_lows[last - MA_200W_TOUCH_LOOKBACK + 1: last + 1]
+    lowest_touch = min(touch_window)
+    touch_pct = round((lowest_touch - ma_now) / ma_now * 100, 2)
+    if touch_pct > MA_200W_TOUCH_TOLERANCE_PCT:
+        return None   # criterion 2: never actually got close to the level
+    weeks_since_touch = len(touch_window) - 1 - touch_window.index(lowest_touch)
+
+    return {
+        "ma_200w": round(ma_now, 2),
+        "ma_slope_pct": ma_slope_pct,
+        "touch_pct": touch_pct,
+        "weeks_since_touch": weeks_since_touch,
+        "extension_pct": extension_pct,
+    }
 
 
 def _leg_liquidity(long_leg, short_leg):
@@ -195,7 +284,7 @@ def _construct_long_call(
         return None
 
     dte = call.dte
-    price_target = stock_price + 1.5 * atr14 * dte / 10
+    price_target = _atr_price_target(stock_price, atr14, dte, bullish=True)
     intrinsic_at_target = max(0.0, price_target - call.strike)
     gain_at_target = intrinsic_at_target - call.ask
     if gain_at_target <= 0:
@@ -263,7 +352,7 @@ def _construct_long_put(
         return None
 
     dte = put.dte
-    price_target = stock_price - 1.5 * atr14 * dte / 10
+    price_target = _atr_price_target(stock_price, atr14, dte, bullish=False)
     intrinsic_at_target = max(0.0, put.strike - price_target)
     gain_at_target = intrinsic_at_target - put.ask
     if gain_at_target <= 0:
@@ -383,7 +472,7 @@ def _construct_bull_call_spread_technical(
         delta=round(long_leg.delta, 2),
         iv_rank=chain.iv_rank,
         premium=net_debit,
-        price_target=round(stock_price + 1.5 * atr14 * dte / 10, 2),
+        price_target=round(_atr_price_target(stock_price, atr14, dte, bullish=True), 2),
         rr_ratio=rr_ratio,
         max_loss=round(net_debit * 100, 2),
         breakeven_move_pct=breakeven_move_pct,
@@ -466,7 +555,7 @@ def _construct_bear_put_spread_technical(
         delta=round(long_leg.delta, 2),
         iv_rank=chain.iv_rank,
         premium=net_debit,
-        price_target=round(stock_price - 1.5 * atr14 * dte / 10, 2),
+        price_target=round(_atr_price_target(stock_price, atr14, dte, bullish=False), 2),
         rr_ratio=rr_ratio,
         max_loss=round(net_debit * 100, 2),
         breakeven_move_pct=breakeven_move_pct,
@@ -521,6 +610,113 @@ def _pick_best_structure(
         return spread_fn(*args) or long_fn(*args)
 
 
+def _download_weekly_batch(batch: list[str]) -> dict[str, tuple[list[float], list[float]]]:
+    """Weekly close/low history for a batch of symbols, keyed by symbol.
+
+    Independent of the daily 1y fetch above: the 200W bounce needs ~4.5 years
+    of WEEKLY bars (200 for the SMA + 10 for slope + buffer), which the daily
+    fetch does not carry and cannot be resampled up to reliably. Batched the
+    same way as the daily fetch, for the same memory reason.
+    """
+    out: dict[str, tuple[list[float], list[float]]] = {}
+    try:
+        raw = yf.download(
+            tickers=batch, period="5y", interval="1wk",
+            auto_adjust=True, progress=False,
+        )
+    except Exception as e:
+        logger.warning("Weekly download failed for batch of %d: %s", len(batch), e)
+        return out
+
+    for symbol in batch:
+        try:
+            if len(batch) == 1:
+                df = raw.dropna()
+            elif isinstance(raw.columns, pd.MultiIndex):
+                df = raw.xs(symbol, axis=1, level=1).dropna()
+            else:
+                df = raw.dropna()
+            if len(df) < MA_200W_PERIOD + MA_200W_SLOPE_LOOKBACK:
+                continue
+            out[symbol] = (df["Close"].tolist(), df["Low"].tolist())
+        except Exception as e:
+            logger.debug("Weekly parse failed for %s: %s", symbol, e)
+
+    del raw
+    return out
+
+
+def _construct_200w_bounce_long_call(
+    symbol: str,
+    stock_price: float,
+    chain,
+    bounce_facts: dict,
+    atr14: float,
+) -> Optional[TechnicalSetup]:
+    """Long call for a 200W MA bounce: deeper ITM and longer-dated than the
+    consensus long call (0.65 delta / 60-100 DTE vs 0.45 delta / 30-60 DTE),
+    since this is a slower thesis with less need to lean on theta-heavy
+    leverage. Reuses the same (now sqrt-scaled) ATR price target and the same
+    2.0 min-R:R gate as every other technical structure."""
+    candidates = [c for c in chain.calls if 60 <= c.dte <= 100]
+    if not candidates:
+        return None
+    call = min(candidates, key=lambda c: abs(c.delta - 0.65))
+    if call.bid <= 0:
+        return None
+
+    dte = call.dte
+    price_target = _atr_price_target(stock_price, atr14, dte, bullish=True)
+    intrinsic_at_target = max(0.0, price_target - call.strike)
+    gain_at_target = intrinsic_at_target - call.ask
+    if gain_at_target <= 0:
+        return None
+
+    rr_ratio = round(gain_at_target / call.ask, 2)
+    if rr_ratio < 2.0:
+        return None
+
+    breakeven = call.strike + call.ask
+    breakeven_move_pct = round((breakeven - stock_price) / stock_price * 100, 1)
+
+    oi_l, oi_s, sp_l, sp_s, liq_ok = _leg_liquidity(call, None)
+    if oi_l < 100 or sp_l > 15.0:
+        return None
+    try:
+        long_occ = call.occ_symbol or build_occ(symbol, call.expiry, False, call.strike)
+    except ValueError:
+        long_occ = ""
+
+    return TechnicalSetup(
+        symbol=symbol,
+        stock_price=stock_price,
+        direction="bullish",
+        signal_count=4,          # the 4 qualifying criteria, not a 7-signal count
+        signal_details=bounce_facts,
+        structure="long_call",
+        strike=call.strike,
+        short_strike=None,
+        expiry=call.expiry,
+        dte=dte,
+        delta=round(call.delta, 2),
+        iv_rank=chain.iv_rank,
+        premium=call.ask,
+        price_target=round(price_target, 2),
+        rr_ratio=rr_ratio,
+        max_loss=round(call.ask * 100, 2),
+        breakeven_move_pct=breakeven_move_pct,
+        probability_of_profit=round(abs(call.delta) * 100, 1),
+        order_string=f"BUY +1 {symbol} {call.expiry:%m/%d} {call.strike:g} CALL @{call.ask:.2f} LMT",
+        earnings_within_dte=False,
+        long_leg_oi=oi_l, short_leg_oi=oi_s,
+        long_leg_spread_pct=sp_l, short_leg_spread_pct=sp_s,
+        liquidity_ok=liq_ok,
+        long_occ=long_occ, short_occ="",
+        entry_mid=round(call.mid, 4) if call.mid > 0 else None,
+        setup_type="200w_bounce",
+    )
+
+
 _BATCH_SIZE = 15  # symbols per yfinance download — keeps peak DataFrame ~15× smaller
 
 
@@ -558,6 +754,7 @@ def scan_technical_setups(
         return []
 
     qualifying = []
+    atr_by_symbol: dict[str, float] = {}
     batches = [symbols[i:i + _BATCH_SIZE] for i in range(0, len(symbols), _BATCH_SIZE)]
 
     for batch_idx, batch in enumerate(batches):
@@ -590,6 +787,8 @@ def scan_technical_setups(
                     logger.debug("%s: insufficient price history (%d rows)", symbol, len(df))
                     continue
 
+                atr_by_symbol[symbol] = _atr14(df)
+
                 score, details = score_signals(symbol, df, qqq_df)
                 logger.info("Technical scan: %s score=%d details=%s", symbol, score, details)
 
@@ -616,6 +815,23 @@ def scan_technical_setups(
     gc.collect()
 
     logger.info("Technical scan: %d/%d symbols qualify for options check", len(qualifying), len(symbols))
+
+    # 200W MA bounce: a standalone, high-conviction setup independent of the
+    # 7-signal consensus above — it can fire for a symbol the consensus
+    # rejects entirely, and vice versa. Bullish-only (see _score_200w_bounce);
+    # skipped outright when the caller only wants bearish setups.
+    bounce_qualifying: list[tuple[str, dict]] = []
+    if direction in ("bullish", "both"):
+        for batch_idx, batch in enumerate(batches):
+            weekly = _download_weekly_batch(batch)
+            for symbol, (closes, lows) in weekly.items():
+                facts = _score_200w_bounce(closes, lows)
+                if facts is not None:
+                    logger.info("Technical scan: %s 200W bounce qualifies: %s", symbol, facts)
+                    bounce_qualifying.append((symbol, facts))
+            gc.collect()
+        logger.info("Technical scan: %d/%d symbols qualify for 200W bounce",
+                    len(bounce_qualifying), len(symbols))
 
     setups: list[TechnicalSetup] = []
 
@@ -648,6 +864,24 @@ def scan_technical_setups(
 
         if i % 15 == 14:
             gc.collect()
+
+    for symbol, facts in bounce_qualifying:
+        try:
+            chain = fetch_option_chain(symbol)
+            if chain.stock_price == 0:
+                logger.warning("Technical scan: %s (200W) chain returned stock_price=0", symbol)
+                del chain
+                continue
+            setup = _construct_200w_bounce_long_call(
+                symbol, chain.stock_price, chain, facts, atr_by_symbol.get(symbol, 0.0),
+            )
+            del chain
+            if setup is None or setup.rr_ratio < min_rr:
+                logger.info("Technical scan: %s (200W) no structure met R:R >= %.1f", symbol, min_rr)
+                continue
+            setups.append(setup)
+        except Exception as e:
+            logger.warning("200W bounce structure failed for %s: %s", symbol, e)
 
     setups.sort(key=lambda s: s.rr_ratio, reverse=True)
     logger.info("Technical scan complete: %d setups found", len(setups))

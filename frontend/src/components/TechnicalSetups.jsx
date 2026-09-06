@@ -61,9 +61,22 @@ function SignalBadges({ details, direction }) {
   )
 }
 
+function BounceFacts({ facts }) {
+  if (!facts) return null
+  return (
+    <div style={styles.bounceFacts}>
+      <span>200W MA ${facts.ma_200w?.toFixed(2)}</span>
+      <span>MA slope {facts.ma_slope_pct >= 0 ? '+' : ''}{facts.ma_slope_pct}%</span>
+      <span>Touched {facts.touch_pct <= 0 ? `${Math.abs(facts.touch_pct)}% below` : `${facts.touch_pct}% above`} the MA, {facts.weeks_since_touch}w ago</span>
+      <span>Now {facts.extension_pct >= 0 ? '+' : ''}{facts.extension_pct}% off the MA</span>
+    </div>
+  )
+}
+
 function SetupCard({ setup }) {
   const [copied, setCopied] = useState(false)
   const isBearish = setup.direction === 'bearish'
+  const isBounce = setup.setup_type === '200w_bounce'
   const structureLabel = {
     long_call:       'Long Call',
     long_put:        'Long Put',
@@ -91,7 +104,7 @@ function SetupCard({ setup }) {
         </div>
         <div style={styles.cardRight}>
           <span style={{ ...styles.badge, color: isBearish ? '#ff4444' : '#00ffaa', borderColor: isBearish ? '#ff4444' : '#00ffaa' }}>
-            {setup.signal_count}/7 {setup.direction.toUpperCase()}
+            {isBounce ? '200W MA BOUNCE' : `${setup.signal_count}/7 ${setup.direction.toUpperCase()}`}
           </span>
           <span style={styles.structureLabel}>{structureLabel}</span>
         </div>
@@ -128,7 +141,9 @@ function SetupCard({ setup }) {
         </div>
       </div>
 
-      <SignalBadges details={setup.signal_details} direction={setup.direction} />
+      {isBounce
+        ? <BounceFacts facts={setup.signal_details} />
+        : <SignalBadges details={setup.signal_details} direction={setup.direction} />}
 
       <button style={styles.copyBtn} onClick={copyOrder}>
         {copied ? '✓ Copied' : 'Copy Order'}
@@ -388,6 +403,7 @@ const styles = {
   metricLabel: { fontFamily: 'monospace', fontSize: '9px', color: '#555', letterSpacing: '0.08em' },
   metricVal: { fontFamily: 'monospace', fontSize: '13px', color: '#aaa', fontWeight: 'bold' },
   signals: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' },
+  bounceFacts: { display: 'flex', flexWrap: 'wrap', gap: '12px', padding: '0 16px 8px', fontSize: '11px', color: '#888', fontFamily: 'monospace' },
   signal: { fontFamily: 'monospace', fontSize: '10px' },
   copyBtn: {
     background: 'none', border: '1px solid #2a2a3e', color: '#555',

@@ -106,7 +106,8 @@ def test_technical_setup_fields():
 from unittest.mock import patch, MagicMock
 from datetime import datetime
 from models import OptionChainData, OptionContract
-from technical_scanner import _construct_long_call, _construct_long_put, _pick_best_structure
+from technical_scanner import (_construct_long_call, _construct_long_put, _pick_best_structure,
+                                _construct_bull_call_spread_technical, _construct_bear_put_spread_technical)
 
 def _make_chain(symbol="NVDA", price=875.0, iv_rank=32.0):
     expiry = date(2026, 6, 20)  # ~60 DTE from test date
@@ -148,21 +149,36 @@ def _make_chain(symbol="NVDA", price=875.0, iv_rank=32.0):
 def test_construct_long_call_returns_setup():
     chain = _make_chain()
     signal_details = {k: True for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
-    setup = _construct_long_call("NVDA", 875.0, chain, 7, signal_details, atr14=15.0)
+    # atr14=30, not 15: price_target now scales as sqrt(dte/10), not dte/10 (see
+    # _atr_price_target). At dte=45 that is ~2.12x ATR instead of ~4.5x, so the
+    # old atr14=15 no longer clears the rr_ratio >= 2.0 gate.
+    setup = _construct_long_call("NVDA", 875.0, chain, 7, signal_details, atr14=30.0)
     assert setup is not None
     assert setup.structure == "long_call"
     assert setup.strike == 900.0  # closest to 0.45 delta
     assert setup.rr_ratio >= 2.0
     assert setup.direction == "bullish"
+    # Pins the actual number, not just "a setup exists" — a construct_long_call
+    # that stopped delegating to _atr_price_target (e.g. inlined the old
+    # linear dte/10 formula again) would still pass rr_ratio >= 2.0 here with
+    # atr14=30, since a bigger, wrong target only helps the gate. Only an
+    # exact-value assertion catches that regression.
+    from technical_scanner import _atr_price_target
+    expected_target = round(_atr_price_target(875.0, 30.0, setup.dte, bullish=True), 2)
+    assert setup.price_target == expected_target
 
 def test_construct_long_put_returns_setup():
     chain = _make_chain()
     signal_details = {k: False for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
-    setup = _construct_long_put("NVDA", 875.0, chain, 7, signal_details, atr14=15.0)
+    # See test_construct_long_call_returns_setup for why atr14 changed from 15.
+    setup = _construct_long_put("NVDA", 875.0, chain, 7, signal_details, atr14=30.0)
     assert setup is not None
     assert setup.structure == "long_put"
     assert setup.strike == 850.0  # closest to 0.45 delta (abs)
     assert setup.direction == "bearish"
+    from technical_scanner import _atr_price_target
+    expected_target = round(_atr_price_target(875.0, 30.0, setup.dte, bullish=False), 2)
+    assert setup.price_target == expected_target
 
 def test_pick_best_structure_low_iv_prefers_long_call():
     chain = _make_chain(iv_rank=30.0)
@@ -203,3 +219,57 @@ def test_scan_technical_setups_returns_list(mock_chain, mock_yf):
 
     setups = scan_technical_setups(["NVDA"], min_rr=2.0, direction="both")
     assert isinstance(setups, list)
+
+
+# ─── ATR price-target scaling ────────────────────────────────────────────────
+
+def test_atr_price_target_matches_original_calibration_at_10_dte():
+    # sqrt(10/10) == 10/10 == 1, so the new formula must agree with the old
+    # one exactly at the point it was originally calibrated against.
+    from technical_scanner import _atr_price_target
+    assert _atr_price_target(100.0, 4.0, 10, bullish=True) == 106.0
+    assert _atr_price_target(100.0, 4.0, 10, bullish=False) == 94.0
+
+
+def test_atr_price_target_scales_as_sqrt_not_linear():
+    from technical_scanner import _atr_price_target
+    move_10d = _atr_price_target(100.0, 4.0, 10, bullish=True) - 100.0
+    move_40d = _atr_price_target(100.0, 4.0, 40, bullish=True) - 100.0
+    # Linear (the bug) would give exactly 4x; sqrt gives 2x.
+    assert abs(move_40d / move_10d - 2.0) < 0.001
+
+
+def test_atr_price_target_no_longer_overstates_at_41_dte():
+    """Reproduces the live PANW case from production: shipped target implied a
+    -37.8% move on a 41 DTE put; the corrected target implies about -18.7%."""
+    from technical_scanner import _atr_price_target
+    spot, atr = 333.26, 20.47
+    target = _atr_price_target(spot, atr, 41, bullish=False)
+    move_pct = (target - spot) / spot * 100
+    assert -20.0 < move_pct < -17.0   # was -37.8% under the linear formula
+
+
+# ─── spread constructors: no test existed for either before this, so the
+# linear-vs-sqrt ATR mutation on their price_target lines was invisible ───────
+
+def test_construct_bull_call_spread_technical_price_target():
+    chain = _make_chain()
+    signal_details = {k: True for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
+    setup = _construct_bull_call_spread_technical("NVDA", 875.0, chain, 7, signal_details, atr14=30.0)
+    assert setup is not None
+    assert setup.structure == "bull_call_spread"
+    assert setup.strike == 900.0 and setup.short_strike == 950.0
+    from technical_scanner import _atr_price_target
+    expected = round(_atr_price_target(875.0, 30.0, setup.dte, bullish=True), 2)
+    assert setup.price_target == expected
+
+
+def test_construct_bear_put_spread_technical_price_target():
+    chain = _make_chain()
+    signal_details = {k: False for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
+    setup = _construct_bear_put_spread_technical("NVDA", 875.0, chain, 7, signal_details, atr14=30.0)
+    assert setup is not None
+    assert setup.structure == "bear_put_spread"
+    from technical_scanner import _atr_price_target
+    expected = round(_atr_price_target(875.0, 30.0, setup.dte, bullish=False), 2)
+    assert setup.price_target == expected
