@@ -81,7 +81,9 @@ _cache: dict = {
     "technical_symbols_scanned": 0,  # int
     "last_scan_stats": None,  # dict with diagnostic counts from last scan
     "celt_setups": [],        # list[CeltSetup]
-    "celt_timestamp": None,   # datetime
+    "celt_timestamp": None,   # datetime — last scan that found >=1 setup
+    "celt_last_attempt": None,  # datetime — last scan that completed at all,
+                                 # empty or not (see _run_celt_scan)
     "last_scan_error": None,  # dict | None — set on failure, cleared on success
     "last_scan_note": None,   # dict | None — benign "nothing found", not a failure
 }
@@ -252,6 +254,16 @@ async def _run_celt_scan() -> None:
         try:
             loop = asyncio.get_running_loop()
             setups = await loop.run_in_executor(None, scan_celt_setups, QQQ_TOP50)
+            now_ts = datetime.now(timezone.utc)
+            # Recorded unconditionally — the scan *completed* whether or not it
+            # found anything. celt_timestamp below only advances on a non-empty
+            # result, so without this the frontend has no way to tell "never
+            # scanned" apart from "scanned, found nothing" (see CeltSetups.jsx's
+            # empty-state message) whenever the market has gone a long stretch
+            # with zero qualifying setups — the common case, since CELT is a
+            # rare, high-conviction detector.
+            _cache["celt_last_attempt"] = now_ts
+            save_scan_results("celt_last_attempt", [], now_ts)
             if not setups:
                 # Same trap as the full scan: an empty result is far more often
                 # a yfinance/Schwab failure than a genuine "no setups today".
@@ -260,12 +272,11 @@ async def _run_celt_scan() -> None:
                 # became visible after the next cold start.
                 _record_scan_note("celt", "0 setups — market not in a crash; cached results kept")
                 return
-            celt_ts = datetime.now(timezone.utc)
             _cache["celt_setups"] = setups
             _cache["last_scan_note"] = None
-            _cache["celt_timestamp"] = celt_ts
+            _cache["celt_timestamp"] = now_ts
             _cache["last_scan_error"] = None
-            save_scan_results("celt_results", [_serialize(s) for s in setups], celt_ts)
+            save_scan_results("celt_results", [_serialize(s) for s in setups], now_ts)
             elapsed = time.monotonic() - t_start
             logger.info("CELT scan complete: %d setups, %.1fs", len(setups), elapsed)
         except Exception as e:
@@ -371,6 +382,17 @@ async def startup():
     except Exception as e:
         logger.warning("Could not load CELT results from Supabase: %s", e)
 
+    try:
+        # Stored with an empty data list — only the timestamp matters here, so
+        # the usual "raw and ts" truthiness check (which would reject an empty
+        # list) doesn't apply.
+        _, attempt_ts = load_scan_results("celt_last_attempt")
+        if attempt_ts:
+            _cache["celt_last_attempt"] = attempt_ts
+            logger.info("Loaded CELT last-attempt timestamp from Supabase (as_of=%s)", attempt_ts)
+    except Exception as e:
+        logger.warning("Could not load CELT last-attempt timestamp from Supabase: %s", e)
+
     asyncio.create_task(refresh_sector_analysis())
 
 
@@ -453,6 +475,7 @@ async def health(request: Request):
         "last_scan_note": _cache.get("last_scan_note"),
         "scan_in_progress": _scan_lock.locked(),
         "celt_last_scan": _cache["celt_timestamp"].isoformat() if _cache["celt_timestamp"] else None,
+        "celt_last_attempt": _cache["celt_last_attempt"].isoformat() if _cache["celt_last_attempt"] else None,
         "celt_setups_count": len(_cache["celt_setups"]),
     }
 
@@ -576,6 +599,7 @@ async def get_celt_setups(
 ):
     setups = _cache["celt_setups"]
     ts = _cache["celt_timestamp"]
+    attempt = _cache["celt_last_attempt"]
 
     filtered = [s for s in setups if _attr(s, 'signal_score', default=0) >= min_score]
     if sort == "drawdown":
@@ -588,6 +612,11 @@ async def get_celt_setups(
     return JSONResponse(content={
         "setups": [_serialize(s) for s in filtered],
         "scan_timestamp": ts.isoformat() if ts else None,
+        # Set even when scan_timestamp isn't — a completed scan that found
+        # nothing. Lets the frontend distinguish "never scanned" from
+        # "scanned, found nothing" instead of showing the same empty state
+        # for both (see CeltSetups.jsx).
+        "last_attempt": attempt.isoformat() if attempt else None,
         "symbols_scanned": len(QQQ_TOP50),
     })
 

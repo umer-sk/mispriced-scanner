@@ -158,6 +158,11 @@ export default function CeltSetups() {
   const [elapsed, setElapsed] = useState(0)
   const [error, setError] = useState(null)
   const [scanTimestamp, setScanTimestamp] = useState(null)
+  // Set even when scanTimestamp isn't: a completed scan that found nothing.
+  // CELT is a rare, high-conviction detector, so celt_timestamp can stay null
+  // indefinitely even after many successful scans — this is what lets the
+  // empty state below say "found nothing" instead of "never scanned".
+  const [lastAttempt, setLastAttempt] = useState(null)
   const [filters, setFilters] = useState({ minScore: 2.2, sort: 'score' })
 
   const pollRef = useRef(null)
@@ -182,6 +187,7 @@ export default function CeltSetups() {
       const data = await fetchCeltSetups(filters)
       setSetups(data.setups || [])
       setScanTimestamp(data.scan_timestamp)
+      setLastAttempt(data.last_attempt)
       setError(null)
     } catch (e) {
       setError(e.message)
@@ -197,7 +203,11 @@ export default function CeltSetups() {
     let baseline = null
     try {
       const health = await fetchHealth()
-      baseline = health.celt_last_scan ?? null
+      // celt_last_attempt, not celt_last_scan: the latter only advances when
+      // the scan finds >=1 setup, so polling on it would wait the full 120s
+      // fallback below every time the market has zero crash candidates —
+      // the common case. celt_last_attempt advances on every completed scan.
+      baseline = health.celt_last_attempt ?? null
       await triggerCeltScan()
     } catch (e) {
       setError(e.message)
@@ -212,7 +222,7 @@ export default function CeltSetups() {
       pollRef.current = setInterval(async () => {
         try {
           const health = await fetchHealth()
-          if (health.celt_last_scan && health.celt_last_scan !== baseline) {
+          if (health.celt_last_attempt && health.celt_last_attempt !== baseline) {
             clearAllTimers()
             setScanPhase('done')
             await load()
@@ -231,8 +241,12 @@ export default function CeltSetups() {
     }, 120000)
   }
 
-  const scanTime = scanTimestamp
-    ? new Date(scanTimestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York' })
+  // scanTimestamp when the last scan found something; otherwise fall back to
+  // lastAttempt so the header still reflects the most recent scan activity
+  // rather than going blank for however long the market stays quiet.
+  const lastActivity = scanTimestamp || lastAttempt
+  const scanTime = lastActivity
+    ? new Date(lastActivity).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York' })
     : '—'
 
   return (
@@ -243,7 +257,7 @@ export default function CeltSetups() {
           <span style={styles.count}>{loading ? '…' : `${setups.length} setups`}</span>
         </div>
         <div style={styles.headerRight}>
-          {scanTimestamp && (
+          {lastActivity && (
             <span style={styles.scanTime}>Last scan: {scanTime} ET</span>
           )}
           <button
@@ -313,6 +327,8 @@ export default function CeltSetups() {
         <div style={styles.empty}>
           {scanTimestamp
             ? 'No CELT setups meet your filters. Try lowering the min score or running a fresh scan.'
+            : lastAttempt
+            ? `No qualifying crash setups as of the last scan (${scanTime} ET) — the market may not be in a crash right now. Try running a fresh scan.`
             : 'No scan data yet. Click ▶ RUN SCAN to run the first CELT scan (~60s).'}
         </div>
       )}
