@@ -82,3 +82,15 @@ export async function fetchForwardTestPositions(params = {}) {
   if (!res.ok) throw new Error(`Forward test positions error: ${res.status}`)
   return res.json()
 }
+
+// occSymbols: array of OCC option symbols (TradeJournal.jsx entries carry
+// these as long_occ/short_occ). Returns { quotes: { occSymbol: mid } } —
+// a symbol Schwab couldn't quote is simply absent, not an error.
+export async function fetchPositionQuotes(occSymbols) {
+  if (!occSymbols.length) return { quotes: {} }
+  const params = new URLSearchParams()
+  for (const occ of occSymbols) params.append('occ', occ)
+  const res = await fetch(`${BASE_URL}/position-quotes?${params}`)
+  if (!res.ok) throw new Error(`Position quotes error: ${res.status}`)
+  return res.json()
+}

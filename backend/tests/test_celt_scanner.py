@@ -279,6 +279,34 @@ def test_scan_wires_front_month_iv_into_the_score(monkeypatch):
     assert 0 <= s.leap_spread_pct <= LEAP_MAX_SPREAD_PCT
 
 
+def test_leap_occ_is_built_when_the_contract_carries_no_occ_symbol(monkeypatch):
+    """CeltSetup.leap_occ lets a position saved to the trade journal be
+    re-priced later via schwab_client.fetch_quotes — the same gap
+    TradeSetup.long_occ / TechnicalSetup.long_occ already closed for their
+    own structures. Recomputes the expected value via build_occ rather than
+    hardcoding the string, so it survives an unrelated format change."""
+    import celt_scanner as cs
+    from occ import build_occ
+
+    closes = _crash_closes()
+    spot = closes[-1]
+    leap_strike = spot * 0.6
+    leap = _c(leap_strike, 400, iv=0.45, delta=0.80,
+              bid=spot * 0.42, ask=spot * 0.43, oi=2000)
+    chain = _chain(
+        calls=[_c(spot, 30, iv=1.20), _c(spot, 35, iv=1.15), leap],
+        stock_price=spot, iv30=0.68, iv_rank=55.0,
+    )
+    monkeypatch.setattr(cs, "_fetch_closes", lambda syms: {"NVDA": closes})
+    monkeypatch.setattr(cs, "fetch_option_chain", lambda sym, days_out=105: chain)
+
+    setups = cs.scan_celt_setups(["NVDA"])
+
+    assert len(setups) == 1
+    expected = build_occ("NVDA", leap.expiry, False, leap.strike)
+    assert setups[0].leap_occ == expected
+
+
 def test_scan_drops_the_symbol_when_every_leap_is_too_wide(monkeypatch):
     """A market-wide spread blowout must not be silently indistinguishable
     from 'no qualifying strikes'."""

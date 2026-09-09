@@ -82,6 +82,22 @@ const styles = {
     color: '#00ffaa',
     borderBottom: '2px solid #00ffaa',
   },
+  tabDescription: {
+    padding: '8px 16px',
+    borderBottom: '1px solid #1a1a2e',
+    background: '#07070f',
+    color: '#666',
+    fontFamily: 'monospace',
+    fontSize: '11px',
+    lineHeight: '1.5',
+  },
+}
+
+const TAB_DESCRIPTIONS = {
+  dashboard: 'Compares option prices to a fair-value model across 9 signals (IV rank, skew, put-call parity, term structure, straddle vs. realized move) to find contracts priced away from where the math says they should be.',
+  setups: 'Scores each stock on 7 technical signals (trend stage, EMA alignment, RSI, volume, relative strength, breakout) plus a separate 200-week MA bounce detector, and builds a call/put or spread around whichever signals agree.',
+  celt: 'Flags QQQ holdings in a genuine drawdown — price damage, volatility spike, sentiment capitulation — and pairs each with a deep-ITM LEAP call as a low-cost way to buy the recovery.',
+  forward: 'Every setup the scanner surfaces gets logged and marked to market against fixed exit rules (+50%/+100% targets, -50% stop) — what actually happened, not a backtest.',
 }
 
 export default function App() {
@@ -141,19 +157,19 @@ export default function App() {
           style={{ ...styles.tab, ...(tab === 'dashboard' ? styles.tabActive : {}) }}
           onClick={() => setTab('dashboard')}
         >
-          SCANNER
+          MISPRICED OPTIONS
         </button>
         <button
           style={{ ...styles.tab, ...(tab === 'setups' ? styles.tabActive : {}) }}
           onClick={() => setTab('setups')}
         >
-          SETUPS
+          TECHNICAL SETUPS
         </button>
         <button
           style={{ ...styles.tab, ...(tab === 'celt' ? styles.tabActive : {}) }}
           onClick={() => setTab('celt')}
         >
-          CRASH LEAPS
+          CRASH ENTRY LEAPS
         </button>
         <button
           style={{ ...styles.tab, ...(tab === 'journal' ? styles.tabActive : {}) }}
@@ -168,6 +184,10 @@ export default function App() {
           FORWARD TEST
         </button>
       </div>
+
+      {TAB_DESCRIPTIONS[tab] && (
+        <div style={styles.tabDescription}>{TAB_DESCRIPTIONS[tab]}</div>
+      )}
 
       {tab === 'dashboard' && (
         <>

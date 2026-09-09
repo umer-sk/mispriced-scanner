@@ -215,6 +215,10 @@ class CeltSetup:
     entry_notes: str
     leap_spread_pct: float = -1.0  # 0-100, bid/ask as % of mid; -1 = unknown
                                    # (0.0 would read as a perfectly tight market)
+    # OCC symbol for the LEAP contract — lets a saved journal position be
+    # re-priced later via schwab_client.fetch_quotes, same as
+    # TradeSetup.long_occ / TechnicalSetup.long_occ. "" means undeterminable.
+    leap_occ: str = ""
 
 
 @dataclass

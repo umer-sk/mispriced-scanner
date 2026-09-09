@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { fetchCeltSetups, triggerCeltScan, fetchHealth } from '../api.js'
+import { saveNewTrade } from '../journal.js'
+import SaveToJournalModal from './SaveToJournalModal.jsx'
 
 const SCORE_BAR_TIPS = {
   Price: 'Price Damage (0–1.0): how far the stock has fallen from its 52-week high. ≥40% drawdown = full score.',
@@ -20,7 +22,7 @@ function ScoreBar({ label, value, max }) {
   )
 }
 
-function CeltCard({ setup }) {
+function CeltCard({ setup, onSaveToJournal }) {
   const [expanded, setExpanded] = useState(false)
 
   const totalColor = setup.signal_score >= 2.8 ? '#00ffaa' : '#ffaa00'
@@ -78,6 +80,13 @@ function CeltCard({ setup }) {
         <span style={{ ...styles.leapMeta, color: '#00ffaa' }} title="Ask price per share. Cost per contract = ask × 100. This is what you pay to enter the trade.">${setup.leap_ask?.toFixed(2)} ask</span>
         <span style={{ ...styles.leapMeta, color: '#555' }} title="Open Interest: number of outstanding contracts for this strike/expiry. Higher OI = more liquid, easier to enter and exit.">OI {setup.leap_oi?.toLocaleString()}</span>
       </div>
+
+      <button
+        style={styles.saveBtn}
+        onClick={e => { e.stopPropagation(); onSaveToJournal(setup) }}
+      >
+        Save to Journal
+      </button>
 
       {/* Expanded detail */}
       {expanded && (
@@ -164,6 +173,31 @@ export default function CeltSetups() {
   // empty state below say "found nothing" instead of "never scanned".
   const [lastAttempt, setLastAttempt] = useState(null)
   const [filters, setFilters] = useState({ minScore: 2.2, sort: 'score' })
+  const [saveTarget, setSaveTarget] = useState(null)
+  const [contractCount, setContractCount] = useState(1)
+  const [notes, setNotes] = useState('')
+
+  function confirmSave() {
+    if (!saveTarget) return
+    const s = saveTarget
+    const expiryStr = s.leap_expiry
+      ? new Date(s.leap_expiry + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
+      : '—'
+    saveNewTrade({
+      symbol: s.symbol,
+      structureLabel: `LEAP Call ${expiryStr} $${s.leap_strike}`,
+      entryDebit: s.leap_ask,
+      contracts: contractCount,
+      thesis: s.entry_notes,
+      scoreAtEntry: s.signal_score,
+      notes,
+      longOcc: s.leap_occ,
+      shortOcc: '',
+    })
+    setSaveTarget(null)
+    setContractCount(1)
+    setNotes('')
+  }
 
   const pollRef = useRef(null)
   const elapsedTimerRef = useRef(null)
@@ -335,9 +369,22 @@ export default function CeltSetups() {
 
       <div style={{ paddingBottom: '32px' }}>
         {setups.map((setup, i) => (
-          <CeltCard key={`${setup.symbol}-${i}`} setup={setup} />
+          <CeltCard key={`${setup.symbol}-${i}`} setup={setup} onSaveToJournal={setSaveTarget} />
         ))}
       </div>
+
+      {saveTarget && (
+        <SaveToJournalModal
+          symbolLine={`${saveTarget.symbol} — LEAP Call $${saveTarget.leap_strike}`}
+          unitCost={saveTarget.leap_ask}
+          contracts={contractCount}
+          onContractsChange={setContractCount}
+          notes={notes}
+          onNotesChange={setNotes}
+          onCancel={() => setSaveTarget(null)}
+          onConfirm={confirmSave}
+        />
+      )}
     </div>
   )
 }
@@ -426,6 +473,11 @@ const styles = {
   leapStrike: { fontFamily: 'monospace', fontSize: '13px', color: '#ddd', fontWeight: 'bold' },
   leapExpiry: { fontFamily: 'monospace', fontSize: '11px', color: '#888' },
   leapMeta: { fontFamily: 'monospace', fontSize: '11px', color: '#666' },
+  saveBtn: {
+    background: 'none', border: '1px solid #2a2a3e', color: '#555',
+    cursor: 'pointer', padding: '3px 10px', borderRadius: '3px',
+    fontFamily: 'monospace', fontSize: '10px', marginTop: '4px',
+  },
   detail: { borderTop: '1px solid #111', marginTop: '8px', paddingTop: '10px' },
   detailGrid: { display: 'flex', gap: '16px', flexWrap: 'wrap', marginBottom: '8px' },
   detailItem: { display: 'flex', flexDirection: 'column', gap: '2px' },

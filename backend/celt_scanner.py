@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import yfinance as yf
 
 from models import CeltSetup, OptionChainData, OptionContract
+from occ import build_occ
 from schwab_client import fetch_option_chain, _compute_hv30, iv_rank_from_decimal
 
 logger = logging.getLogger(__name__)
@@ -426,6 +427,10 @@ def scan_celt_setups(tickers: list[str]) -> list[CeltSetup]:
             details = {"pd": pd_details, "vol": vol_details, "sent": sent_details}
             confidence = _compute_confidence(total)
             entry_notes = _build_entry_notes(pd_score, vol_score, sent_score, details)
+            try:
+                leap_occ = leap.occ_symbol or build_occ(sym, leap.expiry, False, leap.strike)
+            except ValueError:
+                leap_occ = ""
 
             setup = CeltSetup(
                 symbol=sym,
@@ -456,6 +461,7 @@ def scan_celt_setups(tickers: list[str]) -> list[CeltSetup]:
                 leap_iv=round(leap.iv, 4),
                 confidence=confidence,
                 entry_notes=entry_notes,
+                leap_occ=leap_occ,
             )
             setups.append(setup)
             logger.info("CELT: %s score=%.2f drawdown=%.0f%% IVR=%.0f LEAP %.0f %s",

@@ -3,7 +3,16 @@ import MarketContext from './MarketContext.jsx'
 import FilterBar from './FilterBar.jsx'
 import OpportunityCard from './OpportunityCard.jsx'
 import OpportunityTable from './OpportunityTable.jsx'
+import SaveToJournalModal from './SaveToJournalModal.jsx'
 import { triggerScan, fetchHealth } from '../api.js'
+import { saveNewTrade } from '../journal.js'
+
+const STRUCTURE_LABELS = {
+  bull_call_spread: 'Bull Call Spread',
+  bear_put_spread: 'Bear Put Spread',
+  calendar: 'Calendar Spread',
+  long_call: 'Long Call',
+}
 
 const DATA_STALE_THRESHOLD = 90 * 60  // 90 minutes in seconds
 
@@ -140,25 +149,19 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
 
   function confirmSave() {
     if (!saveTarget) return
-    const journal = JSON.parse(localStorage.getItem('qqq_journal') || '[]')
-    journal.push({
-      id: crypto.randomUUID(),
+    const expiryStr = new Date(saveTarget.expiry + 'T00:00:00')
+      .toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    saveNewTrade({
       symbol: saveTarget.symbol,
-      structure: `${({ bull_call_spread: 'Bull Call Spread', bear_put_spread: 'Bear Put Spread', calendar: 'Calendar Spread', long_call: 'Long Call' }[saveTarget.structure] ?? saveTarget.structure)} ${new Date(saveTarget.expiry + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} $${saveTarget.long_strike}/$${saveTarget.short_strike}`,
-      entry_date: new Date().toISOString().split('T')[0],
-      entry_debit: saveTarget.net_debit,
+      structureLabel: `${STRUCTURE_LABELS[saveTarget.structure] ?? saveTarget.structure} ${expiryStr} $${saveTarget.long_strike}/$${saveTarget.short_strike}`,
+      entryDebit: saveTarget.net_debit,
       contracts: contractCount,
-      total_cost: Math.round(saveTarget.net_debit * contractCount * 100),
       thesis: saveTarget.catalyst.catalyst_summary,
-      score_at_entry: saveTarget.score,
-      status: 'OPEN',
-      exit_date: null,
-      exit_credit: null,
-      pnl_dollars: null,
-      pnl_pct: null,
+      scoreAtEntry: saveTarget.score,
       notes,
+      longOcc: saveTarget.long_occ,
+      shortOcc: saveTarget.short_occ,
     })
-    localStorage.setItem('qqq_journal', JSON.stringify(journal))
     setSaveTarget(null)
   }
 
@@ -279,40 +282,16 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
 
       {/* Save to journal modal */}
       {saveTarget && (
-        <div style={styles.modalOverlay} onClick={() => setSaveTarget(null)}>
-          <div style={styles.modal} onClick={e => e.stopPropagation()}>
-            <div style={styles.modalTitle}>SAVE TO JOURNAL</div>
-            <div style={styles.modalSymbol}>
-              {saveTarget.symbol} — {saveTarget.structure} ${saveTarget.long_strike}/${saveTarget.short_strike}
-            </div>
-            <label style={styles.modalLabel}>
-              Contracts
-              <input
-                type="number" min="1" max="100" value={contractCount}
-                onChange={e => setContractCount(parseInt(e.target.value) || 1)}
-                style={styles.modalInput}
-              />
-            </label>
-            <div style={{ fontSize: '12px', color: '#888', fontFamily: 'monospace', marginBottom: '12px' }}>
-              Total cost: ${(saveTarget.net_debit * contractCount * 100).toFixed(0)}
-            </div>
-            <label style={styles.modalLabel}>
-              Notes (optional)
-              <textarea
-                value={notes}
-                onChange={e => setNotes(e.target.value)}
-                placeholder="Why you're taking this trade..."
-                style={{ ...styles.modalInput, height: '80px', resize: 'vertical' }}
-              />
-            </label>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-              <button style={styles.modalBtn} onClick={() => setSaveTarget(null)}>CANCEL</button>
-              <button style={{ ...styles.modalBtn, ...styles.modalBtnPrimary }} onClick={confirmSave}>
-                SAVE
-              </button>
-            </div>
-          </div>
-        </div>
+        <SaveToJournalModal
+          symbolLine={`${saveTarget.symbol} — ${saveTarget.structure} $${saveTarget.long_strike}/$${saveTarget.short_strike}`}
+          unitCost={saveTarget.net_debit}
+          contracts={contractCount}
+          onContractsChange={setContractCount}
+          notes={notes}
+          onNotesChange={setNotes}
+          onCancel={() => setSaveTarget(null)}
+          onConfirm={confirmSave}
+        />
       )}
     </div>
   )
@@ -423,71 +402,5 @@ const styles = {
     color: '#555',
     fontFamily: 'monospace',
     fontSize: '13px',
-  },
-  modalOverlay: {
-    position: 'fixed',
-    inset: 0,
-    background: 'rgba(0,0,0,0.7)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 1000,
-  },
-  modal: {
-    background: '#0d0d1a',
-    border: '1px solid #2a2a3e',
-    borderRadius: '6px',
-    padding: '24px',
-    minWidth: '320px',
-    maxWidth: '480px',
-    width: '90%',
-  },
-  modalTitle: {
-    fontFamily: 'monospace',
-    fontSize: '13px',
-    color: '#00ffaa',
-    letterSpacing: '0.1em',
-    marginBottom: '8px',
-  },
-  modalSymbol: {
-    fontFamily: 'monospace',
-    fontSize: '12px',
-    color: '#aaa',
-    marginBottom: '16px',
-  },
-  modalLabel: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '4px',
-    fontFamily: 'monospace',
-    fontSize: '11px',
-    color: '#666',
-    marginBottom: '12px',
-  },
-  modalInput: {
-    background: '#080810',
-    border: '1px solid #2a2a3e',
-    color: '#ddd',
-    padding: '6px 10px',
-    borderRadius: '3px',
-    fontFamily: 'monospace',
-    fontSize: '13px',
-    width: '100%',
-  },
-  modalBtn: {
-    padding: '8px 16px',
-    background: 'none',
-    border: '1px solid #333',
-    color: '#aaa',
-    cursor: 'pointer',
-    fontFamily: 'monospace',
-    fontSize: '12px',
-    borderRadius: '3px',
-    flex: 1,
-  },
-  modalBtnPrimary: {
-    border: '1px solid #00ffaa',
-    color: '#00ffaa',
-    background: '#0a1a0f',
   },
 }

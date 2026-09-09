@@ -14,7 +14,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -31,7 +31,7 @@ from scanner import run_all_detectors
 from sector_analysis import get_sector_analysis
 from technical_analysis import get_technical_contexts
 from technical_scanner import BOUNCE_RR_MIN, scan_technical_setups
-from schwab_client import fetch_all_chains, fetch_option_chain
+from schwab_client import fetch_all_chains, fetch_option_chain, fetch_quotes
 from celt_scanner import scan_celt_setups
 from supabase_client import load_scan_results, save_scan_results
 from forward_test import mark_open_positions, snapshot_setups
@@ -98,6 +98,12 @@ _scan_lock = asyncio.Lock()
 # this fraction of chains we refuse to overwrite the cache or Supabase, because
 # doing so destroys the last good snapshot and stamps it with a fresh timestamp.
 MIN_CHAIN_SUCCESS_RATIO = 0.5
+
+# /position-quotes is unauthenticated like every other endpoint here; cap how
+# many distinct contracts one request can ask Schwab to quote. Far above any
+# realistic personal journal (fetch_quotes chunks by 25 anyway), just a floor
+# against abuse.
+MAX_POSITION_QUOTE_SYMBOLS = 50
 
 
 def _record_scan_note(scan: str, message: str) -> None:
@@ -619,6 +625,32 @@ async def get_celt_setups(
         "last_attempt": attempt.isoformat() if attempt else None,
         "symbols_scanned": len(QQQ_TOP50),
     })
+
+
+@app.get("/position-quotes")
+@limiter.limit("20/minute")
+async def get_position_quotes(
+    request: Request,
+    occ: list[str] = Query(default=[]),
+):
+    """Live mid price for arbitrary OCC contracts.
+
+    Lets a position saved to the (client-side, localStorage) trade journal be
+    re-priced later regardless of which tab it came from — the backend holds
+    no journal state of its own. Thin wrapper around fetch_quotes, the same
+    function the forward-test tracker uses to mark its own positions; a
+    symbol Schwab can't quote is simply absent from the response, same as
+    there.
+    """
+    # dict.fromkeys, not set(): preserves order, which does not matter here,
+    # but a set would too — either way, de-dupe before the cap so 50 repeats
+    # of one symbol can't crowd out the rest of a request.
+    symbols = list(dict.fromkeys(s for s in occ if s))[:MAX_POSITION_QUOTE_SYMBOLS]
+    if not symbols:
+        return JSONResponse(content={"quotes": {}})
+    loop = asyncio.get_running_loop()
+    quotes = await loop.run_in_executor(None, fetch_quotes, symbols)
+    return JSONResponse(content={"quotes": quotes})
 
 
 @app.get("/forward-test")

@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { fetchTechnicalSetups, triggerSetupsScan } from '../api.js'
+import { saveNewTrade } from '../journal.js'
+import SaveToJournalModal from './SaveToJournalModal.jsx'
 
 // Each of the 7 signals is computed as a BULLISH test in the backend
 // (score_signals in technical_scanner.py), and a bearish setup fires a badge
@@ -41,6 +43,23 @@ const SIGNALS = {
   },
 }
 
+// Auto-generated thesis text for a saved journal entry — TechnicalSetup has
+// no narrative field like TradeSetup's catalyst.catalyst_summary, so this
+// reuses the same SIGNALS labels the card itself renders.
+function signalsSummary(setup) {
+  if (setup.setup_type === '200w_bounce') {
+    return '200-week MA bounce — touched and reclaimed a rising 200-week moving average'
+  }
+  const dir = setup.direction === 'bearish' ? 'bearish' : 'bullish'
+  const firing = Object.entries(SIGNALS)
+    .filter(([key, variants]) => {
+      const isBullishSignal = setup.signal_details[key]
+      return dir === 'bullish' ? isBullishSignal : !isBullishSignal
+    })
+    .map(([, variants]) => variants[dir].label)
+  return `${setup.signal_count}/7 ${dir} signals: ${firing.join(', ')}`
+}
+
 function SignalBadges({ details, direction }) {
   const dir = direction === 'bearish' ? 'bearish' : 'bullish'
   return (
@@ -61,6 +80,13 @@ function SignalBadges({ details, direction }) {
   )
 }
 
+const STRUCTURE_LABELS = {
+  long_call:        'Long Call',
+  long_put:         'Long Put',
+  bull_call_spread: 'Bull Call Spread',
+  bear_put_spread:  'Bear Put Spread',
+}
+
 function BounceFacts({ facts }) {
   if (!facts) return null
   return (
@@ -73,16 +99,11 @@ function BounceFacts({ facts }) {
   )
 }
 
-function SetupCard({ setup }) {
+function SetupCard({ setup, onSaveToJournal }) {
   const [copied, setCopied] = useState(false)
   const isBearish = setup.direction === 'bearish'
   const isBounce = setup.setup_type === '200w_bounce'
-  const structureLabel = {
-    long_call:       'Long Call',
-    long_put:        'Long Put',
-    bull_call_spread:'Bull Call Spread',
-    bear_put_spread: 'Bear Put Spread',
-  }[setup.structure] ?? setup.structure
+  const structureLabel = STRUCTURE_LABELS[setup.structure] ?? setup.structure
 
   const expiryStr = setup.expiry
     ? new Date(setup.expiry + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
@@ -145,9 +166,14 @@ function SetupCard({ setup }) {
         ? <BounceFacts facts={setup.signal_details} />
         : <SignalBadges details={setup.signal_details} direction={setup.direction} />}
 
-      <button style={styles.copyBtn} onClick={copyOrder}>
-        {copied ? '✓ Copied' : 'Copy Order'}
-      </button>
+      <div style={{ display: 'flex', gap: '8px' }}>
+        <button style={styles.copyBtn} onClick={copyOrder}>
+          {copied ? '✓ Copied' : 'Copy Order'}
+        </button>
+        <button style={styles.copyBtn} onClick={() => onSaveToJournal(setup)}>
+          Save to Journal
+        </button>
+      </div>
     </div>
   )
 }
@@ -169,6 +195,32 @@ export default function TechnicalSetups() {
   // it only stops silently hiding a 200W bounce setup that already cleared
   // its own, separately-calibrated 1.5 bar.
   const [filters, setFilters] = useState({ direction: 'both', minRR: 1.5, sort: 'rr' })
+  const [saveTarget, setSaveTarget] = useState(null)
+  const [contractCount, setContractCount] = useState(1)
+  const [notes, setNotes] = useState('')
+
+  function confirmSave() {
+    if (!saveTarget) return
+    const s = saveTarget
+    const expiryStr = s.expiry
+      ? new Date(s.expiry + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      : '—'
+    const structureLabel = STRUCTURE_LABELS[s.structure] ?? s.structure
+    saveNewTrade({
+      symbol: s.symbol,
+      structureLabel: `${structureLabel} ${expiryStr} $${s.strike}${s.short_strike ? `/$${s.short_strike}` : ''}`,
+      entryDebit: s.premium,
+      contracts: contractCount,
+      thesis: signalsSummary(s),
+      scoreAtEntry: s.signal_count,
+      notes,
+      longOcc: s.long_occ,
+      shortOcc: s.short_occ,
+    })
+    setSaveTarget(null)
+    setContractCount(1)
+    setNotes('')
+  }
 
   function clearAllTimers() {
     clearInterval(pollRef.current)
@@ -334,9 +386,26 @@ export default function TechnicalSetups() {
 
       <div style={{ paddingBottom: '32px' }}>
         {setups.map((setup, i) => (
-          <SetupCard key={`${setup.symbol}-${setup.structure}-${i}`} setup={setup} />
+          <SetupCard
+            key={`${setup.symbol}-${setup.structure}-${i}`}
+            setup={setup}
+            onSaveToJournal={setSaveTarget}
+          />
         ))}
       </div>
+
+      {saveTarget && (
+        <SaveToJournalModal
+          symbolLine={`${saveTarget.symbol} — ${STRUCTURE_LABELS[saveTarget.structure] ?? saveTarget.structure} $${saveTarget.strike}${saveTarget.short_strike ? `/$${saveTarget.short_strike}` : ''}`}
+          unitCost={saveTarget.premium}
+          contracts={contractCount}
+          onContractsChange={setContractCount}
+          notes={notes}
+          onNotesChange={setNotes}
+          onCancel={() => setSaveTarget(null)}
+          onConfirm={confirmSave}
+        />
+      )}
     </div>
   )
 }

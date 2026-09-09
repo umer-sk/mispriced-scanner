@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react'
+import { fetchPositionQuotes } from '../api.js'
+import { JOURNAL_STORAGE_KEY } from '../journal.js'
 
 function daysHeld(entryDate) {
   const start = new Date(entryDate)
@@ -6,15 +8,19 @@ function daysHeld(entryDate) {
   return Math.floor((now - start) / 86400000)
 }
 
-// Every field Dashboard.confirmSave writes. The export header used to be a
-// hand-maintained subset that had drifted: it named `dte` and `date_saved`,
-// neither of which is ever written (so both exported empty), while
-// entry_date / total_cost / thesis / score_at_entry were written but never
-// exported — silently lost on any export -> import round trip.
+// Every field Dashboard/TechnicalSetups/CeltSetups' confirmSave writes. The
+// export header used to be a hand-maintained subset that had drifted: it
+// named `dte` and `date_saved`, neither of which is ever written (so both
+// exported empty), while entry_date / total_cost / thesis / score_at_entry
+// were written but never exported — silently lost on any export -> import
+// round trip. long_occ/short_occ are what let an OPEN position be re-priced
+// (see the price-fetching effect below) — omitting them here would silently
+// lose live pricing on every export -> import round trip, the same way the
+// four fields above were once lost.
 const TRADE_FIELDS = [
   'id', 'symbol', 'structure', 'entry_date', 'entry_debit', 'contracts',
   'total_cost', 'thesis', 'score_at_entry', 'status', 'exit_date',
-  'exit_credit', 'pnl_dollars', 'pnl_pct', 'notes',
+  'exit_credit', 'pnl_dollars', 'pnl_pct', 'notes', 'long_occ', 'short_occ',
 ]
 
 // A row must have these to render without throwing.
@@ -94,14 +100,14 @@ export default function TradeJournal() {
   const [importMsg, setImportMsg] = useState(null)
 
   useEffect(() => {
-    const stored = JSON.parse(localStorage.getItem('qqq_journal') || '[]')
+    const stored = JSON.parse(localStorage.getItem(JOURNAL_STORAGE_KEY) || '[]')
     setTrades(stored)
   }, [])
 
   function save(updated) {
     // setItem can throw (quota, private browsing). Write first so a failure
     // does not leave the UI showing state that was never persisted.
-    localStorage.setItem('qqq_journal', JSON.stringify(updated))
+    localStorage.setItem(JOURNAL_STORAGE_KEY, JSON.stringify(updated))
     setTrades(updated)
   }
 
@@ -132,6 +138,41 @@ export default function TradeJournal() {
 
   const open = trades.filter(t => t.status === 'OPEN')
   const closed = trades.filter(t => t.status !== 'OPEN')
+
+  // Sorted/joined so the effect below only refires when the actual SET of
+  // occ symbols needed changes (add/close/delete/import) — not on every
+  // render, and not on edits to fields (notes, thesis) that don't affect it.
+  const openOccKey = open
+    .map(t => `${t.long_occ || ''}|${t.short_occ || ''}`)
+    .sort()
+    .join(',')
+
+  const [quotes, setQuotes] = useState({})
+  const [quotesError, setQuotesError] = useState(null)
+
+  useEffect(() => {
+    const symbols = [...new Set(
+      open.flatMap(t => [t.long_occ, t.short_occ]).filter(Boolean)
+    )]
+    if (symbols.length === 0) {
+      setQuotes({})
+      setQuotesError(null)
+      return
+    }
+    let cancelled = false
+    fetchPositionQuotes(symbols)
+      .then(data => {
+        if (cancelled) return
+        setQuotes(data.quotes || {})
+        setQuotesError(null)
+      })
+      .catch(e => {
+        if (cancelled) return
+        setQuotesError(e.message)
+      })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openOccKey])
 
   const wins = closed.filter(t => (t.pnl_dollars || 0) > 0).length
   const winRate = closed.length > 0 ? Math.round((wins / closed.length) * 100) : null
@@ -266,10 +307,16 @@ export default function TradeJournal() {
       {open.length > 0 && (
         <>
           <div style={styles.sectionTitle}>OPEN POSITIONS</div>
+          {quotesError && (
+            <div style={{ ...styles.importMsg, ...styles.importMsgError, margin: '0 0 8px' }}>
+              Could not fetch current prices: {quotesError}
+            </div>
+          )}
           {open.map(t => (
             <TradeRow
               key={t.id}
               trade={t}
+              quotes={quotes}
               onClose={() => { setCloseTarget(t); setExitCredit('') }}
               onDelete={() => deleteTrade(t.id)}
             />
@@ -336,7 +383,23 @@ export default function TradeJournal() {
   )
 }
 
-function TradeRow({ trade, onClose, onDelete }) {
+// Current value of one position from a { occSymbol: mid } quote map, or null
+// when it can't be determined (no long_occ — a trade saved before this
+// feature existed — or a leg Schwab didn't return a quote for). Mirrors
+// forward_test.py's mark_open_positions: a missing short leg's quote is
+// unknown, not zero, so it must not silently price the spread as if the
+// short leg were worthless.
+function currentPriceOf(trade, quotes) {
+  if (!trade.long_occ) return null
+  const longMid = quotes[trade.long_occ]
+  if (longMid == null) return null
+  if (!trade.short_occ) return longMid
+  const shortMid = quotes[trade.short_occ]
+  if (shortMid == null) return null
+  return longMid - shortMid
+}
+
+function TradeRow({ trade, quotes, onClose, onDelete }) {
   const {
     symbol, structure, entry_date, entry_debit, contracts, total_cost,
     thesis, score_at_entry, status, exit_date, exit_credit, pnl_dollars, pnl_pct, notes,
@@ -344,6 +407,11 @@ function TradeRow({ trade, onClose, onDelete }) {
 
   const held = daysHeld(entry_date)
   const isOpen = status === 'OPEN'
+
+  const currentPrice = isOpen ? currentPriceOf(trade, quotes || {}) : null
+  const unrealizedPct = (currentPrice != null && entry_debit)
+    ? ((currentPrice - entry_debit) / entry_debit) * 100
+    : null
 
   return (
     <div style={styles.row}>
@@ -355,6 +423,15 @@ function TradeRow({ trade, onClose, onDelete }) {
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           {isOpen && (
             <span style={styles.openBadge}>OPEN</span>
+          )}
+          {isOpen && unrealizedPct != null && (
+            <span style={{
+              ...styles.openBadge,
+              color: unrealizedPct >= 0 ? '#00ffaa' : '#ff4444',
+              border: `1px solid ${unrealizedPct >= 0 ? '#00ffaa' : '#ff4444'}`,
+            }}>
+              {unrealizedPct >= 0 ? '+' : ''}{unrealizedPct.toFixed(0)}%
+            </span>
           )}
           {!isOpen && (
             <span style={{
@@ -372,7 +449,15 @@ function TradeRow({ trade, onClose, onDelete }) {
         </div>
       </div>
       <div style={styles.rowMeta}>
-        <span>Entry {entry_debit != null ? `$${Number(entry_debit).toFixed(2)}` : '—'} × {contracts ?? '—'} = {total_cost != null ? `$${total_cost}` : '—'}</span>
+        <span>
+          Bought {entry_debit != null ? `$${Number(entry_debit).toFixed(2)}` : '—'}
+          {isOpen && (
+            currentPrice != null
+              ? ` → Current $${currentPrice.toFixed(2)}`
+              : trade.long_occ ? ' → Current —' : ''
+          )}
+          {' '}× {contracts ?? '—'} = {total_cost != null ? `$${total_cost}` : '—'}
+        </span>
         <span>Score at entry: {score_at_entry}</span>
         <span>Entry: {entry_date}</span>
         {isOpen && <span style={{ color: '#666' }}>Held {held}d</span>}
