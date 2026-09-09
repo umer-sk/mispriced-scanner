@@ -65,6 +65,39 @@ def test_score_signals_bearish():
     assert score <= -3, f"Expected bearish score <= -3, got {score}"
 
 
+def test_breakout_signal_tightened_to_2pct_from_5pct():
+    """A 3% pullback from the 50-day high used to still pass the old 5%
+    breakout threshold, which passed trivially in any grinding uptrend; the
+    tightened 2% threshold correctly excludes it."""
+    last_50 = [100.0] * 40 + [99.0, 98.5, 98.0, 97.5, 97.0, 97.0, 97.0, 97.0, 97.0, 97.0]
+    df = _make_df(last_50)
+    qqq_df = _make_df([300.0] * 220)
+    _, details = score_signals("TEST", df, qqq_df)
+    assert details['breakout'] is False
+
+
+def test_breakout_signal_still_passes_within_2pct_of_high():
+    last_50 = [100.0] * 40 + [99.5, 99.0, 98.5, 99.0, 99.0, 99.0, 99.0, 99.0, 99.0, 99.0]
+    df = _make_df(last_50)
+    qqq_df = _make_df([300.0] * 220)
+    _, details = score_signals("TEST", df, qqq_df)
+    assert details['breakout'] is True
+
+
+def test_rs_lookback_uses_60_days_not_10():
+    """A stock up 36% over 60 days but flat over the last 11 must read as
+    outperforming QQQ — the old 10-day-only window would have read this as a
+    dead heat (both flat over that shorter span) and missed real, sustained
+    relative strength."""
+    tail_60 = [100.0 + i * 0.7 for i in range(49)] + [136.0] * 11  # flat for the last 11 closes
+    closes = [100.0] * (220 - 60) + tail_60
+    qqq_closes = [100.0] * 220  # QQQ flat the whole window
+    df = _make_df(closes)
+    qqq_df = _make_df(qqq_closes)
+    _, details = score_signals("TEST", df, qqq_df)
+    assert details['rs_vs_qqq'] is True
+
+
 def test_score_signals_mixed():
     """Flat/noisy prices should score between -2 and +2."""
     import math
@@ -180,17 +213,40 @@ def test_construct_long_put_returns_setup():
     expected_target = round(_atr_price_target(875.0, 30.0, setup.dte, bullish=False), 2)
     assert setup.price_target == expected_target
 
+def test_bull_spread_rr_is_connected_to_the_atr_forecast():
+    """Mutation guard for the EV-based spread R:R swap. The old (width-debit)
+    /debit payoff ratio was a pure function of strikes and price — it could
+    not have produced different numbers for different atr14 inputs on the
+    same chain, the way this must. atr14=5 doesn't clear SPREAD_RR_MIN at
+    all; 30 and 60 both clear it with meaningfully different rr, not a flat
+    ~2.1-3.3 regardless of input."""
+    from technical_scanner import _construct_bull_call_spread_technical, SPREAD_RR_MIN
+    chain = _make_chain()
+    signal_details = {k: True for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
+
+    assert _construct_bull_call_spread_technical("NVDA", 875.0, chain, 7, signal_details, atr14=5.0) is None
+
+    low = _construct_bull_call_spread_technical("NVDA", 875.0, chain, 7, signal_details, atr14=30.0)
+    high = _construct_bull_call_spread_technical("NVDA", 875.0, chain, 7, signal_details, atr14=60.0)
+    assert low is not None and high is not None
+    assert low.rr_ratio >= SPREAD_RR_MIN
+    assert high.rr_ratio > low.rr_ratio + 0.5  # meaningfully different, not flat
+
+
 def test_pick_best_structure_low_iv_prefers_long_call():
+    # atr14=30, not 15: see test_construct_long_call_returns_setup's comment
+    # — price_target scales as sqrt(dte/10), so atr14=15 no longer clears
+    # either structure's R:R gate at this fixture's $875 price/45 DTE.
     chain = _make_chain(iv_rank=30.0)
     signal_details = {k: True for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
-    setup = _pick_best_structure("NVDA", 875.0, chain, "bullish", 7, signal_details, atr14=15.0)
+    setup = _pick_best_structure("NVDA", 875.0, chain, "bullish", 7, signal_details, atr14=30.0)
     assert setup is not None
     assert setup.structure in ("long_call", "bull_call_spread")
 
 def test_pick_best_structure_high_iv_prefers_spread():
     chain = _make_chain(iv_rank=70.0)
     signal_details = {k: True for k in ['price_vs_ema21','ema_alignment','stage2','rsi_zone','volume_accum','rs_vs_qqq','breakout']}
-    setup = _pick_best_structure("NVDA", 875.0, chain, "bullish", 7, signal_details, atr14=15.0)
+    setup = _pick_best_structure("NVDA", 875.0, chain, "bullish", 7, signal_details, atr14=30.0)
     # high IV: spread preferred; if spread fails, falls back to long call
     assert setup is not None
 
@@ -219,6 +275,61 @@ def test_scan_technical_setups_returns_list(mock_chain, mock_yf):
 
     setups = scan_technical_setups(["NVDA"], min_rr=2.0, direction="both")
     assert isinstance(setups, list)
+
+
+def _fixed_technical_setup(dte=45):
+    from datetime import timedelta
+    return TechnicalSetup(
+        symbol="NVDA", stock_price=875.0, direction="bullish", signal_count=7,
+        signal_details={}, structure="long_call", strike=900.0, short_strike=None,
+        expiry=date.today() + timedelta(days=dte), dte=dte, delta=0.45, iv_rank=32.0,
+        premium=20.0, price_target=900.0, rr_ratio=5.0, max_loss=2000.0,
+        breakeven_move_pct=5.0, probability_of_profit=40,
+        order_string="BUY +1 NVDA CALL",
+    )
+
+
+@patch('technical_scanner._download_weekly_batch')  # isolate from the 200W bounce path
+@patch('technical_scanner._fetch_earnings_date')
+@patch('technical_scanner._pick_best_structure')
+@patch('technical_scanner.yf.download')
+@patch('technical_scanner.fetch_option_chain')
+def test_scan_technical_setups_discards_a_setup_with_earnings_in_its_dte_window(
+    mock_chain, mock_yf, mock_pick, mock_earnings, mock_weekly,
+):
+    """Fixes the gap models.py's earnings_within_dte comment used to falsely
+    claim was already handled — nothing filtered on it before this."""
+    from datetime import timedelta
+    from technical_scanner import scan_technical_setups
+
+    # Matches test_score_signals_bullish's fixture (score=6, clears
+    # NET_SCORE_THRESHOLD=3) — a flat/tied series like _make_yf_df's default
+    # doesn't qualify at all (rs_vs_qqq and volume_accum both need real
+    # separation from a tied/constant baseline), so the qualifying-symbols
+    # step upstream of the earnings check would filter this out for an
+    # unrelated reason before ever reaching it.
+    stock_closes = [100.0 + i * 0.5 for i in range(220)]
+    stock_volumes = [500_000] * 200 + [1_500_000] * 20
+    qqq_closes = [300.0 + i * 0.4 for i in range(220)]
+
+    def _yf_side_effect(*args, **kwargs):
+        if args and args[0] == "QQQ":
+            return _make_df(qqq_closes)
+        return _make_df(stock_closes, volumes=stock_volumes)
+
+    mock_yf.side_effect = _yf_side_effect
+    mock_chain.return_value = _make_chain()
+    mock_weekly.return_value = {}
+    mock_pick.return_value = _fixed_technical_setup(dte=45)
+
+    mock_earnings.return_value = None
+    assert len(scan_technical_setups(["NVDA"], min_rr=1.5, direction="both")) == 1
+
+    mock_earnings.return_value = date.today() + timedelta(days=10)  # inside the 45d DTE window
+    assert scan_technical_setups(["NVDA"], min_rr=1.5, direction="both") == []
+
+    mock_earnings.return_value = date.today() + timedelta(days=90)  # outside the 45d DTE window
+    assert len(scan_technical_setups(["NVDA"], min_rr=1.5, direction="both")) == 1
 
 
 # ─── ATR price-target scaling ────────────────────────────────────────────────

@@ -49,20 +49,24 @@ def _resolve_token_path() -> str:
 
 _EFFECTIVE_TOKEN_PATH = _resolve_token_path()
 
-# In-process fallback cache: last good chain per (symbol, days_out), served when
-# a live fetch fails. Keyed on days_out as well as symbol because CELT fetches
-# with days_out=730 while everything else uses 105 — sharing a key let a cached
-# two-year LEAP chain be served to the full scan, which then built nominally
-# 35-DTE setups out of contracts expiring years later.
+# In-process fallback cache: last good chain per (symbol, days_out,
+# strike_count), served when a live fetch fails. Keyed on days_out as well
+# as symbol because CELT fetches with days_out=730 while everything else
+# uses 105 — sharing a key let a cached two-year LEAP chain be served to the
+# full scan, which then built nominally 35-DTE setups out of contracts
+# expiring years later. strike_count joined the key for the same reason:
+# CELT also requests a wider strike_count than the default, so a chain
+# fetched for one strike_count must not be silently served in place of one
+# fetched for another.
 #
 # Bounded: this used to be an unbounded dict, which made the `del chain` and
 # gc.collect() mitigations in technical_scanner.py no-ops (the cache still held
 # every chain ever fetched) and let /chain/{symbol} grow it without limit.
 _CHAIN_CACHE_MAX = 128
-_last_chain_cache: "OrderedDict[tuple[str, int], OptionChainData]" = OrderedDict()
+_last_chain_cache: "OrderedDict[tuple[str, int, int], OptionChainData]" = OrderedDict()
 
 
-def _cache_chain(key: tuple[str, int], chain: OptionChainData) -> None:
+def _cache_chain(key: tuple[str, int, int], chain: OptionChainData) -> None:
     _last_chain_cache[key] = chain
     _last_chain_cache.move_to_end(key)
     while len(_last_chain_cache) > _CHAIN_CACHE_MAX:
@@ -246,11 +250,17 @@ def iv_rank_from_decimal(iv_dec: float, closes: list[float]) -> tuple[float, flo
     return iv_rank, iv_percentile
 
 
-def fetch_option_chain(symbol: str, days_out: int = 105) -> OptionChainData:
+def fetch_option_chain(symbol: str, days_out: int = 105, strike_count: int = 20) -> OptionChainData:
     """
     Fetch full option chain for a symbol.
     On API failure, returns last cached result with is_stale=True.
     Never raises — caller always gets an OptionChainData back.
+
+    strike_count: default 20 (ATM-centred) suits every caller except CELT,
+    which requests a wider count — a crashed name's older/higher-struck
+    puts (needed for its P/C OI ratio read) fall outside a narrow window,
+    and a wider window also gives more strike choices for CELT's deep-ITM
+    selection on names with tight strike spacing.
     """
     client = _get_client()
     today = date.today()
@@ -261,7 +271,7 @@ def fetch_option_chain(symbol: str, days_out: int = 105) -> OptionChainData:
         resp = client.get_option_chain(
             symbol,
             contract_type=schwab.client.Client.Options.ContractType.ALL,
-            strike_count=20,
+            strike_count=strike_count,
             include_underlying_quote=True,
             strategy=schwab.client.Client.Options.Strategy.SINGLE,
             from_date=today,
@@ -326,13 +336,13 @@ def fetch_option_chain(symbol: str, days_out: int = 105) -> OptionChainData:
             puts=puts,
             is_stale=False,
         )
-        _cache_chain((symbol, days_out), chain)
+        _cache_chain((symbol, days_out, strike_count), chain)
         logger.info(f"Fetched chain for {symbol}: stock=${stock_price:.2f} IV30={iv30:.1%} HV30={hv30:.1%} IVR={iv_rank:.0f}")
         return chain
 
     except Exception as e:
         logger.error(f"Failed to fetch chain for {symbol}: {e}")
-        cached = _last_chain_cache.get((symbol, days_out))
+        cached = _last_chain_cache.get((symbol, days_out, strike_count))
         if cached is not None:
             # Copy rather than mutating the cached object in place: the same
             # instance is handed to every caller, so flipping is_stale on it

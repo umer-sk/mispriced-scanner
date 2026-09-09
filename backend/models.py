@@ -131,6 +131,13 @@ class TradeSetup:
     technical_context: Optional[TechnicalContext] = None
     # Score breakdown for UI transparency
     score_breakdown: list[dict] = field(default_factory=list)
+    # Every detector that independently constructed this exact trade (same
+    # structure/expiry/strikes) — run_all_detectors merges duplicates rather
+    # than surfacing the same physical trade once per co-firing detector.
+    # Empty when a TradeSetup is built directly (e.g. in a test) rather than
+    # through run_all_detectors; score_swing_quality/compute_score_breakdown
+    # fall back to [signal.detector] in that case.
+    contributing_detectors: list[str] = field(default_factory=list)
     long_occ: str = ""
     short_occ: str = ""
     # Mid-to-mid entry price (long_leg.mid - short_leg.mid) at construction
@@ -143,6 +150,9 @@ class TradeSetup:
 
 @dataclass
 class MarketContext:
+    # Despite the name, this is QQQ's own blended ATM IV, not a real VIX
+    # reading — see market_context.get_market_context's docstring. Field
+    # names kept as-is for frontend compatibility.
     vix_level: float
     vix_trend: str               # "RISING" | "FALLING" | "STABLE"
     market_regime: str           # "RISK_ON" | "RISK_OFF" | "NEUTRAL"
@@ -220,6 +230,18 @@ class CeltSetup:
     # TradeSetup.long_occ / TechnicalSetup.long_occ. "" means undeterminable.
     leap_occ: str = ""
 
+    # Reward model (see celt_scanner.CELT_RECOVERY_FRACTION) — tracked for
+    # forward-test calibration, not yet a construction gate (a 2.0-style bar
+    # built for 30-60 DTE structures is a category error for a 270-760 DTE
+    # deep-ITM LEAP; see celt_scanner.py). Defaults are 0.0 rather than
+    # Optional so forward_test.normalise(), which reads these unconditionally
+    # for every source, never crashes on a CeltSetup.
+    price_target: float = 0.0
+    rr_ratio: float = 0.0
+    max_loss: float = 0.0             # leap_ask * 100
+    breakeven: float = 0.0            # leap_strike + leap_ask
+    breakeven_move_pct: float = 0.0
+
 
 @dataclass
 class TechnicalSetup:
@@ -253,7 +275,12 @@ class TechnicalSetup:
     # Execution
     order_string: str
 
-    earnings_within_dte: bool = False  # always False (filtered out), kept for transparency
+    # Always False on a setup that reaches this far: scan_technical_setups
+    # discards a constructed setup outright (never appends it) when a real
+    # earnings date falls inside its own DTE window, rather than surfacing
+    # it with this flag set True. Kept as a field for transparency/schema
+    # stability, not because any surfaced setup ever carries earnings risk.
+    earnings_within_dte: bool = False
 
     # Liquidity (forward-test prerequisite — see technical_scanner._leg_liquidity)
     long_leg_oi: int = 0

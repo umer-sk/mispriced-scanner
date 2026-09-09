@@ -2,7 +2,11 @@
 CELT (Crash Entry LEAP Trigger) scanner.
 
 Identifies QQQ-universe stocks in crash / deep-correction mode where buying
-deep-ITM LEAP calls provides asymmetric upside at depressed IV.
+deep-ITM LEAP calls provides asymmetric upside relative to a stock position,
+at a premium that reflects the market's own elevated fear (high IV rank) —
+not at "depressed" IV; elevated IV rank IS what capitulation looks like.
+Being deep-ITM is what keeps the position's vega/theta exposure low despite
+that, so the elevated-IV entry doesn't undermine the thesis.
 
 Three scored signals:
   1. Price Damage    (max 1.0)
@@ -13,12 +17,14 @@ Qualifies if total >= 2.2.
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import yfinance as yf
 
+from catalyst import _fetch_earnings_date
 from models import CeltSetup, OptionChainData, OptionContract
 from occ import build_occ
+from options_math import _single_leg_reward
 from schwab_client import fetch_option_chain, _compute_hv30, iv_rank_from_decimal
 
 logger = logging.getLogger(__name__)
@@ -147,6 +153,31 @@ def _score_volatility(closes: list[float]) -> tuple[float, dict]:
 # the round trip on a 20%-wide market.
 LEAP_MAX_SPREAD_PCT = 15.0
 
+# The minimum DTE that makes a contract a "LEAP" here. Named and exported
+# (rather than a repeated literal) because forward_test.py imports this
+# exact value for its own CELT DTE band, and it must match `_find_best_leap`
+# exactly or the forward test would tier a position on a different DTE
+# assumption than the scanner actually enforced.
+LEAP_DTE_MIN = 270
+
+# Reward model. ATR14 (a ~2-3 week realized-range measure) is the wrong
+# timescale for a 270-760 DTE LEAP bought on a multi-quarter recovery
+# thesis — unlike technical_scanner.py's momentum setups, there's no ATR
+# forecast to reuse here. Instead: assume the stock mean-reverts this
+# fraction of the way back toward its pre-drawdown 52-week high by the
+# LEAP's expiry, and feed that as the drift assumption into the same
+# expected-value model (options_math._single_leg_reward) the rest of the
+# app uses for single-leg options. Verified numerically that even a FULL
+# recovery (fraction=1.0) to the 52-week high scores well under 2.0 at
+# representative deep-ITM/high-IV CELT inputs (~1.7) — the shared 2.0 bar
+# built for 30-60 DTE structures is a category error here, the same reason
+# the 200-week bounce (technical_scanner.py) needed its own lower bar.
+# NOT YET a construction gate — see CELT_RR_MIN in forward_test.py, which
+# feeds this into the tier system instead, so real ft_positions outcomes
+# can calibrate a real threshold rather than committing to a guessed one
+# that could silence the scanner entirely.
+CELT_RECOVERY_FRACTION = 0.5
+
 # Window used to read IV off the FRONT of the curve.
 _FRONT_IV_DTE_MIN, _FRONT_IV_DTE_MAX = 20, 45
 _FRONT_IV_DTE_MAX_FALLBACK = 75
@@ -205,8 +236,8 @@ def _score_sentiment(chain: OptionChainData, iv_rank: float) -> tuple[float, dic
         return 0.0, {"iv_rank": iv_rank, "skipped": True}
 
     # LEAP put/call OI ratio
-    leap_puts_oi = sum(p.open_interest for p in chain.puts if p.dte >= 270 and p.open_interest > 0)
-    leap_calls_oi = sum(c.open_interest for c in chain.calls if c.dte >= 270 and c.open_interest > 0)
+    leap_puts_oi = sum(p.open_interest for p in chain.puts if p.dte >= LEAP_DTE_MIN and p.open_interest > 0)
+    leap_calls_oi = sum(c.open_interest for c in chain.calls if c.dte >= LEAP_DTE_MIN and c.open_interest > 0)
     pc_ratio = leap_puts_oi / leap_calls_oi if leap_calls_oi > 0 else 0.0
 
     if pc_ratio >= 1.5:
@@ -244,7 +275,19 @@ def _spread_pct(c: OptionContract) -> float:
 
 
 
-def _find_best_leap(calls: list[OptionContract]) -> OptionContract | None:
+# A contract must be at least this far ITM by strike, not just by delta, to
+# count as "deep-ITM stock replacement". Delta alone is not enough at the IV
+# levels CELT requires (rank 60-85): at typical CELT operating conditions
+# (T~1.1y, IV 40-80%), the 0.65-0.85 delta band alone admits strikes from
+# roughly at-the-money down to ~34% ITM — a 0.65-delta LEAP bought at IV
+# rank 85 can be essentially ATM, all extrinsic, the opposite of the
+# low-theta/low-vega instrument the "buy the recovery cheaply" framing
+# implies. 0.85 maps to strike ~0.85x spot fairly stably across that IV
+# range, so this cuts the shallow end without fighting the delta band.
+LEAP_MAX_MONEYNESS = 0.85
+
+
+def _find_best_leap(calls: list[OptionContract], stock_price: float) -> OptionContract | None:
     """Find highest-delta deep-ITM LEAP call with dte>=270."""
     def _tradeable(c: OptionContract) -> bool:
         # Open interest alone is not liquidity. Deep-ITM LEAPs routinely quote
@@ -252,15 +295,20 @@ def _find_best_leap(calls: list[OptionContract]) -> OptionContract | None:
         # at leap_ask, so a wide leg silently overstates the entry.
         return c.bid > 0 and _spread_pct(c) <= LEAP_MAX_SPREAD_PCT
 
+    def _deep_itm(c: OptionContract) -> bool:
+        return stock_price > 0 and c.strike <= stock_price * LEAP_MAX_MONEYNESS
+
     candidates = [
         c for c in calls
-        if c.dte >= 270 and 0.65 <= c.delta <= 0.85 and c.open_interest >= 500 and _tradeable(c)
+        if c.dte >= LEAP_DTE_MIN and 0.65 <= c.delta <= 0.85 and c.open_interest >= 500
+        and _tradeable(c) and _deep_itm(c)
     ]
     if not candidates:
         # Relaxed fallback
         candidates = [
             c for c in calls
-            if c.dte >= 270 and 0.60 <= c.delta <= 0.90 and c.open_interest >= 100 and _tradeable(c)
+            if c.dte >= LEAP_DTE_MIN and 0.60 <= c.delta <= 0.90 and c.open_interest >= 100
+            and _tradeable(c) and _deep_itm(c)
         ]
     if not candidates:
         return None
@@ -343,12 +391,36 @@ def _build_entry_notes(pd_score: float, vol_score: float, sent_score: float, det
 # Main scan function
 # ---------------------------------------------------------------------------
 
-def scan_celt_setups(tickers: list[str]) -> list[CeltSetup]:
+def scan_celt_setups(tickers: list[str], qqq_price: float, qqq_ma50: float) -> list[CeltSetup]:
     """
     Scan tickers for CELT setups.
     Pre-screens on signals 1+2 (price data only) before fetching LEAP chains.
     Returns list sorted by signal_score descending.
+
+    qqq_price/qqq_ma50: a coarse, cheap systemic-stress prerequisite —
+    without it, nothing here distinguishes a genuine market-wide crash from
+    a single-name blowup (bad earnings, fraud, a guidance cut), and every
+    per-name gate (HV elevation, IV rank) can be satisfied by an
+    idiosyncratic event alone. Required (not defaulted) so a caller can't
+    silently disable the gate. Deliberately QQQ price vs its own 50-day MA
+    — a trend check — rather than market_context's volatility-based RISK_OFF
+    regime, which would have read false through most of a real grinding
+    bear market and partly re-tests what the per-name HV/IV-rank gates
+    below already check at the single-name level.
     """
+    if qqq_ma50 <= 0.0:
+        # A degraded yfinance fetch (market_context._fetch_index_mas
+        # returns ma50=0.0 when it has fewer than 50 days of cached
+        # closes) must not silently disable this gate — a naive `<`
+        # comparison against 0.0 is always False, which would let CELT
+        # fire completely unguarded on exactly a bad-data day.
+        logger.warning("CELT: QQQ MA50 unavailable — cannot confirm market-wide stress, skipping scan")
+        return []
+    if qqq_price >= qqq_ma50:
+        logger.info("CELT: QQQ (%.2f) not below its own 50-day MA (%.2f) — no market-wide stress, skipping scan",
+                    qqq_price, qqq_ma50)
+        return []
+
     logger.info("CELT scan: fetching 1yr closes for %d symbols", len(tickers))
     closes_map = _fetch_closes(tickers)
 
@@ -374,7 +446,13 @@ def scan_celt_setups(tickers: list[str]) -> list[CeltSetup]:
     setups: list[CeltSetup] = []
     for sym, closes, pd_score, pd_details, vol_score, vol_details in qualifying:
         try:
-            chain = fetch_option_chain(sym, days_out=730)
+            # strike_count=40, not the default 20: a crashed name's older,
+            # higher-struck puts (needed for the P/C OI ratio below) fall
+            # outside a narrow ATM-centred window, and the wider window also
+            # gives more strike choices for deep-ITM selection on tightly-
+            # spaced names. OI itself stays a slow/structural signal, not
+            # real-time flow — this widens the window, it doesn't fix that.
+            chain = fetch_option_chain(sym, days_out=730, strike_count=40)
             if chain.stock_price == 0:
                 continue
 
@@ -398,13 +476,13 @@ def scan_celt_setups(tickers: list[str]) -> list[CeltSetup]:
             if total < 2.2:
                 continue
 
-            leap = _find_best_leap(chain.calls)
+            leap = _find_best_leap(chain.calls, stock_price=chain.stock_price)
             if leap is None:
                 # Separate the two causes. A market-wide spread blowout silences
                 # CELT on exactly the day it matters, and that must not look
                 # identical in the logs to a chain with no qualifying strikes.
                 shaped = [c for c in chain.calls
-                          if c.dte >= 270 and 0.60 <= c.delta <= 0.90
+                          if c.dte >= LEAP_DTE_MIN and 0.60 <= c.delta <= 0.90
                           and c.open_interest >= 100 and c.bid > 0]
                 if shaped:
                     spreads = sorted(_spread_pct(c) for c in shaped)
@@ -420,6 +498,19 @@ def scan_celt_setups(tickers: list[str]) -> list[CeltSetup]:
                     )
                 continue
 
+            # Not a DTE-window exclusion (nonsensical at 270+ days — multiple
+            # earnings reports during the hold are inherent to a LEAP-length
+            # thesis, not a flaw to filter out). This is an entry-timing
+            # question instead: avoid entering right before a fresh catalyst
+            # that could extend the crash further; hold through subsequent
+            # reports once in the position. 7 days, not fewer, absorbs
+            # yfinance's earnings-date parsing occasionally landing a day off.
+            earnings_date = _fetch_earnings_date(sym)
+            if earnings_date is not None and date.today() <= earnings_date <= date.today() + timedelta(days=7):
+                logger.info("CELT: %s qualifies (%.2f) but earnings %s is within 7 days — skipping",
+                            sym, total, earnings_date)
+                continue
+
             stock_price = chain.stock_price
             sma200 = pd_details.get("sma200", stock_price)
             pct_from_200sma = (stock_price - sma200) / sma200 * 100 if sma200 else 0.0
@@ -431,6 +522,14 @@ def scan_celt_setups(tickers: list[str]) -> list[CeltSetup]:
                 leap_occ = leap.occ_symbol or build_occ(sym, leap.expiry, False, leap.strike)
             except ValueError:
                 leap_occ = ""
+
+            high_52w = pd_details.get("high_52w", stock_price)
+            price_target = stock_price + CELT_RECOVERY_FRACTION * (high_52w - stock_price)
+            rr_ratio = round(_single_leg_reward(
+                stock_price, leap.strike, leap.dte, leap.iv, price_target, leap.ask, is_put=False,
+            ), 2)
+            breakeven = round(leap.strike + leap.ask, 2)
+            breakeven_move_pct = round((breakeven - stock_price) / stock_price * 100, 1) if stock_price else 0.0
 
             setup = CeltSetup(
                 symbol=sym,
@@ -462,6 +561,11 @@ def scan_celt_setups(tickers: list[str]) -> list[CeltSetup]:
                 confidence=confidence,
                 entry_notes=entry_notes,
                 leap_occ=leap_occ,
+                price_target=round(price_target, 2),
+                rr_ratio=rr_ratio,
+                max_loss=round(leap.ask * 100, 2),
+                breakeven=breakeven,
+                breakeven_move_pct=breakeven_move_pct,
             )
             setups.append(setup)
             logger.info("CELT: %s score=%.2f drawdown=%.0f%% IVR=%.0f LEAP %.0f %s",

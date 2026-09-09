@@ -7,15 +7,16 @@ Stocks with 5+/7 signals agreeing on direction proceed to options structure sele
 import gc
 import logging
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import pandas as pd
 import yfinance as yf
-from scipy.stats import norm
 
+from catalyst import _fetch_earnings_date
 from models import OptionChainData, TechnicalSetup
 from occ import build_occ
+from options_math import _expected_option_value, _single_leg_reward, probability_of_profit
 
 try:
     from schwab_client import fetch_option_chain
@@ -24,74 +25,10 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-
-def _expected_option_value(S: float, K: float, T: float, sigma: float, mu: float, is_put: bool) -> float:
-    """E[payoff] of a European option at expiry, undiscounted, where the
-    underlying is lognormal with E[S_T] = S * exp(mu*T) and volatility sigma.
-
-    This is the actuarial ("real-world") expectation, not a risk-neutral
-    price: same closed form as Black-Scholes with r -> mu and no discounting,
-    since we want expected P&L at the horizon, not a present value.
-
-    Why this replaces "intrinsic value at one point target": that approach
-    throws away the whole probability distribution above (for a call) or
-    below (for a put) the target, which is exactly where a long option's
-    convexity pays off. It also cannot distinguish a setup with real edge
-    from one with none — a flat, no-edge forecast (mu=0) still shows a
-    positive number under intrinsic-at-target once the target sits far
-    enough out, because the point-target model has no way to express "on
-    average, nothing happens." Under this formula, mu=0 always gives exactly
-    the option's own fair value at that vol, and expected_gain = 0.
-    """
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return max(0.0, K - S) if is_put else max(0.0, S - K)
-    d1 = (math.log(S / K) + (mu + sigma**2 / 2) * T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
-    forward = S * math.exp(mu * T)
-    if is_put:
-        return K * norm.cdf(-d2) - forward * norm.cdf(-d1)
-    return forward * norm.cdf(d1) - K * norm.cdf(d2)
-
-
-def _single_leg_reward(
-    stock_price: float, strike: float, dte: int, iv: float,
-    price_target: float, premium: float, is_put: bool,
-) -> float:
-    """Expected-value R:R for a single-leg long option (see
-    _expected_option_value for why intrinsic-at-a-point is the wrong metric).
-
-    `price_target` supplies the drift assumption via mu = ln(target/S)/T —
-    the SAME ATR-based target already computed for display, so this is not a
-    second, independent forecast; it is the existing one evaluated properly
-    across the whole outcome distribution instead of at one point. sigma is
-    the CONTRACT'S OWN IV: this deliberately measures whether the technical
-    signal's implied move is large relative to what the option's own pricing
-    assumes, not whether IV itself is rich or cheap (that question belongs to
-    scanner.py's iv_rank/skew detectors, not this momentum-based scanner).
-
-    Note: mu=0 gives EXACTLY rr=0 only when `premium` equals the option's
-    theoretical fair value at (sigma, r=0). In production `premium` is the
-    real market ask, which differs from that fair value (bid/ask spread,
-    r>0 in the real pricing model, skew) — so a genuinely no-edge input
-    gives rr close to but not exactly 0 (verified: roughly -0.07 to +0.04 at
-    typical spreads/rates). Harmless against a 2.0 gate, but "exactly 0" is
-    a property of _expected_option_value in isolation, not of this function
-    fed real market data.
-    """
-    # price_target <= 0 is reachable in production: _atr_price_target's
-    # bearish branch is `stock_price - 1.5*atr14*sqrt(dte/10)`, which goes
-    # negative once atr14 exceeds roughly 21-38% of price (dte-dependent) — a
-    # single bad yfinance bar (e.g. an unadjusted split) can inflate ATR14
-    # that far. math.log() on a non-positive argument raises ValueError,
-    # which _pick_best_structure's `long_fn(*args) or spread_fn(*args)` does
-    # not catch, so a put's bad ATR previously took the whole symbol's bear
-    # spread down with it too, not just the long put.
-    if iv <= 0 or dte <= 0 or premium <= 0 or stock_price <= 0 or price_target <= 0:
-        return 0.0
-    T = dte / 365.0
-    mu = math.log(price_target / stock_price) / T
-    ev_payoff = _expected_option_value(stock_price, strike, T, iv, mu, is_put)
-    return (ev_payoff - premium) / premium
+# _expected_option_value / _single_leg_reward now live in options_math.py
+# (shared with scanner.py and celt_scanner.py) — re-imported above so
+# `from technical_scanner import _single_leg_reward` keeps working for
+# existing callers/tests.
 
 
 def _atr_price_target(stock_price: float, atr14: float, dte: int, bullish: bool) -> float:
@@ -121,6 +58,10 @@ MA_200W_SLOPE_LOOKBACK = 10   # weeks back to compare the MA against, for slope
 MA_200W_TOUCH_LOOKBACK = 8    # weeks to look back for a touch of the level
 MA_200W_TOUCH_TOLERANCE_PCT = 4.0   # weekly low within this % of (or below) the MA counts as a touch
 MA_200W_MAX_EXTENSION_PCT = 10.0    # current close must be within this % above the MA
+# A touch deeper than this isn't "tested and reclaimed the average" — it's a
+# full crash-through-and-recover, a materially different (and riskier) setup
+# that belongs to CELT's deep-drawdown detection, not a routine bounce.
+MA_200W_TOUCH_FLOOR_PCT = -20.0
 
 # The bounce's structure (0.65 delta, 60-100 DTE) needs a much larger ATR/IV
 # divergence than the 0.45-delta consensus structures do to clear the same
@@ -138,6 +79,17 @@ MA_200W_MAX_EXTENSION_PCT = 10.0    # current close must be within this % above 
 # rr=0 — see _single_leg_reward), just calibrated to this structure rather
 # than reusing a threshold verified only for a different one.
 BOUNCE_RR_MIN = 1.5
+
+# A vertical spread's EV-based R:R (see _construct_bull_call_spread_technical)
+# is NOT the same quantity as a single leg's — the short leg caps convexity,
+# so it needs its own, lower bar for the same reason the bounce needed one
+# below the single-leg structures' shared 2.0. Verified numerically across
+# ATM-long/OTM-short pairs, IV 30-35%, ATR 1.5-5% of spot, DTE 30-60: EV-based
+# rr runs roughly 0.8-2.2 over that range (vs. the disconnected payoff-ratio
+# formula this replaces, which reported a flat 2.1-3.3 regardless of input).
+# 1.5 requires a genuinely strong technical read (roughly ATR >= 2.7% of
+# spot at 45 DTE) to clear, not the near-guaranteed pass the old formula gave.
+SPREAD_RR_MIN = 1.5
 
 
 def _score_200w_bounce(weekly_closes: list[float], weekly_lows: list[float]) -> Optional[dict]:
@@ -157,6 +109,14 @@ def _score_200w_bounce(weekly_closes: list[float], weekly_lows: list[float]) -> 
     Returns None when there isn't enough history or the setup doesn't qualify;
     otherwise a dict of the facts that qualified it (for signal_details).
     """
+    # The most recent weekly bar may still be forming (this can run any day
+    # of the week) — an intraweek wick that's currently trading back above
+    # the MA would otherwise qualify as an already-reclaimed touch with
+    # weeks_since_touch=0 on data that isn't final yet. Always evaluate on
+    # the last CLOSED week.
+    weekly_closes = weekly_closes[:-1]
+    weekly_lows = weekly_lows[:-1]
+
     needed = MA_200W_PERIOD + MA_200W_SLOPE_LOOKBACK
     if len(weekly_closes) < needed or len(weekly_lows) < needed:
         return None
@@ -188,6 +148,8 @@ def _score_200w_bounce(weekly_closes: list[float], weekly_lows: list[float]) -> 
     touch_pct = round((lowest_touch - ma_now) / ma_now * 100, 2)
     if touch_pct > MA_200W_TOUCH_TOLERANCE_PCT:
         return None   # criterion 2: never actually got close to the level
+    if touch_pct < MA_200W_TOUCH_FLOOR_PCT:
+        return None   # pierced too deep to be a routine bounce, not a touch
     weeks_since_touch = len(touch_window) - 1 - touch_window.index(lowest_touch)
 
     return {
@@ -280,8 +242,8 @@ def score_signals(
     Returns (net_score, signal_details) where:
     - Each signal True = bullish for that indicator, False = bearish
     - net_score = count(True) - count(False), range -7 to +7
-    - net_score >= 1 → bullish (4+/7 agree)
-    - net_score <= -1 → bearish (4+/7 agree)
+    - net_score >= NET_SCORE_THRESHOLD (3) → bullish (5+/7 agree)
+    - net_score <= -NET_SCORE_THRESHOLD → bearish (5+/7 agree)
 
     Requires df with at least 220 rows of OHLCV daily data.
     """
@@ -313,15 +275,27 @@ def score_signals(
     vol_20d = float(volume.iloc[-20:].mean())
     volume_accum = vol_5d > vol_20d
 
-    # Signal 6: Relative strength vs QQQ over last 10 days
-    stock_ret = (price / float(close.iloc[-11]) - 1) if len(close) >= 11 else 0.0
+    # Signal 6: Relative strength vs QQQ over the last 60 trading days (~3
+    # months). A 10-day lookback is noisy and, on a universe drawn from QQQ
+    # itself, roughly half of names pass by construction in any given
+    # 10-day window — 60 days is a standard, less noisy RS window.
+    RS_LOOKBACK = 60
+    stock_ret = (
+        (price / float(close.iloc[-(RS_LOOKBACK + 1)]) - 1)
+        if len(close) >= RS_LOOKBACK + 1 else 0.0
+    )
     qqq_close = qqq_df['Close']
-    qqq_ret = (float(qqq_close.iloc[-1]) / float(qqq_close.iloc[-11]) - 1) if len(qqq_close) >= 11 else 0.0
+    qqq_ret = (
+        (float(qqq_close.iloc[-1]) / float(qqq_close.iloc[-(RS_LOOKBACK + 1)]) - 1)
+        if len(qqq_close) >= RS_LOOKBACK + 1 else 0.0
+    )
     rs_vs_qqq = stock_ret > qqq_ret
 
-    # Signal 7: Near 50-day high (within 5%) — breakout candidate
+    # Signal 7: within 2% of the 50-day high — tightened from 5%, which
+    # passed trivially in any grinding uptrend and wasn't really testing for
+    # a breakout at all.
     high_50d = float(close.iloc[-50:].max())
-    breakout = price >= high_50d * 0.95
+    breakout = price >= high_50d * 0.98
 
     details = {
         'price_vs_ema21': price_vs_ema21,
@@ -497,7 +471,12 @@ def _construct_bull_call_spread_technical(
     signal_details: dict,
     atr14: float,
 ) -> Optional[TechnicalSetup]:
-    """Bull call spread: long 0.45Δ, short 0.25Δ, same expiry."""
+    """Bull call spread: long 0.45Δ, short 0.25Δ, same expiry. R:R via the
+    same expected-value model the single-leg constructors use (see
+    options_math._expected_option_value and SPREAD_RR_MIN) — the previous
+    (width-debit)/debit payoff ratio was a pure function of strikes and
+    price, disconnected from the technical signal or the ATR forecast
+    entirely."""
     long_leg = _find_delta_contract(chain.calls, 0.45)
     if long_leg is None:
         return None
@@ -518,14 +497,22 @@ def _construct_bull_call_spread_technical(
     if net_debit <= 0 or net_debit > spread_width * 0.40:
         return None
 
-    max_gain = round(spread_width - net_debit, 2)
-    rr_ratio = round(max_gain / net_debit, 2)
-    if rr_ratio < 2.0:
+    dte = long_leg.dte
+    price_target = _atr_price_target(stock_price, atr14, dte, bullish=True)
+    if price_target <= 0 or long_leg.iv <= 0 or short_leg.iv <= 0:
+        return None
+    T = dte / 365.0
+    mu = math.log(price_target / stock_price) / T
+    ev_spread = (
+        _expected_option_value(stock_price, long_leg.strike, T, long_leg.iv, mu, is_put=False)
+        - _expected_option_value(stock_price, short_leg.strike, T, short_leg.iv, mu, is_put=False)
+    )
+    rr_ratio = round((ev_spread - net_debit) / net_debit, 2)
+    if rr_ratio < SPREAD_RR_MIN:
         return None
 
     breakeven = long_leg.strike + net_debit
     breakeven_move_pct = round((breakeven - stock_price) / stock_price * 100, 1)
-    dte = long_leg.dte
 
     oi_l, oi_s, sp_l, sp_s, liq_ok = _leg_liquidity(long_leg, short_leg)
     # Match scanner.py's hard gate: reject outright rather than surfacing a
@@ -555,7 +542,7 @@ def _construct_bull_call_spread_technical(
         delta=round(long_leg.delta, 2),
         iv_rank=chain.iv_rank,
         premium=net_debit,
-        price_target=round(_atr_price_target(stock_price, atr14, dte, bullish=True), 2),
+        price_target=round(price_target, 2),
         rr_ratio=rr_ratio,
         max_loss=round(net_debit * 100, 2),
         breakeven_move_pct=breakeven_move_pct,
@@ -580,7 +567,9 @@ def _construct_bear_put_spread_technical(
     signal_details: dict,
     atr14: float,
 ) -> Optional[TechnicalSetup]:
-    """Bear put spread: long 0.45Δ put, short 0.25Δ put, same expiry."""
+    """Bear put spread: long 0.45Δ put, short 0.25Δ put, same expiry. R:R
+    via the same expected-value model as the bull side — see
+    _construct_bull_call_spread_technical."""
     long_leg = _find_delta_contract(chain.puts, 0.45)
     if long_leg is None:
         return None
@@ -601,14 +590,22 @@ def _construct_bear_put_spread_technical(
     if net_debit <= 0 or net_debit > spread_width * 0.40:
         return None
 
-    max_gain = round(spread_width - net_debit, 2)
-    rr_ratio = round(max_gain / net_debit, 2)
-    if rr_ratio < 2.0:
+    dte = long_leg.dte
+    price_target = _atr_price_target(stock_price, atr14, dte, bullish=False)
+    if price_target <= 0 or long_leg.iv <= 0 or short_leg.iv <= 0:
+        return None
+    T = dte / 365.0
+    mu = math.log(price_target / stock_price) / T
+    ev_spread = (
+        _expected_option_value(stock_price, long_leg.strike, T, long_leg.iv, mu, is_put=True)
+        - _expected_option_value(stock_price, short_leg.strike, T, short_leg.iv, mu, is_put=True)
+    )
+    rr_ratio = round((ev_spread - net_debit) / net_debit, 2)
+    if rr_ratio < SPREAD_RR_MIN:
         return None
 
     breakeven = long_leg.strike - net_debit
     breakeven_move_pct = round((stock_price - breakeven) / stock_price * 100, 1)
-    dte = long_leg.dte
 
     oi_l, oi_s, sp_l, sp_s, liq_ok = _leg_liquidity(long_leg, short_leg)
     # Match scanner.py's hard gate: reject outright rather than surfacing a
@@ -638,7 +635,7 @@ def _construct_bear_put_spread_technical(
         delta=round(long_leg.delta, 2),
         iv_rank=chain.iv_rank,
         premium=net_debit,
-        price_target=round(_atr_price_target(stock_price, atr14, dte, bullish=False), 2),
+        price_target=round(price_target, 2),
         rr_ratio=rr_ratio,
         max_loss=round(net_debit * 100, 2),
         breakeven_move_pct=breakeven_move_pct,
@@ -953,6 +950,13 @@ def scan_technical_setups(
             if setup.rr_ratio < min_rr:
                 logger.info("Technical scan: %s structure rr=%.2f below min_rr=%.1f", symbol, setup.rr_ratio, min_rr)
                 continue
+
+            earnings_date = _fetch_earnings_date(symbol)
+            if earnings_date is not None and date.today() <= earnings_date <= date.today() + timedelta(days=setup.dte):
+                logger.info("Technical scan: %s skipped — earnings %s within its %dd DTE window",
+                            symbol, earnings_date, setup.dte)
+                continue
+
             setups.append(setup)
 
         except Exception as e:
@@ -963,18 +967,33 @@ def scan_technical_setups(
 
     for symbol, facts in bounce_qualifying:
         try:
+            atr = atr_by_symbol.get(symbol)
+            if atr is None:
+                # The daily-batch fetch failed for this symbol (or it was
+                # never in `symbols` in the first place) — atr14=0.0 would
+                # silently produce a degenerate price target equal to spot
+                # rather than surfacing the missing data.
+                logger.warning("Technical scan: %s (200W) ATR unavailable, skipping", symbol)
+                continue
             chain = fetch_option_chain(symbol)
             if chain.stock_price == 0:
                 logger.warning("Technical scan: %s (200W) chain returned stock_price=0", symbol)
                 del chain
                 continue
             setup = _construct_200w_bounce_long_call(
-                symbol, chain.stock_price, chain, facts, atr_by_symbol.get(symbol, 0.0),
+                symbol, chain.stock_price, chain, facts, atr,
             )
             del chain
             if setup is None or setup.rr_ratio < min_rr:
                 logger.info("Technical scan: %s (200W) no structure met R:R >= %.1f", symbol, min_rr)
                 continue
+
+            earnings_date = _fetch_earnings_date(symbol)
+            if earnings_date is not None and date.today() <= earnings_date <= date.today() + timedelta(days=setup.dte):
+                logger.info("Technical scan: %s (200W) skipped — earnings %s within its %dd DTE window",
+                            symbol, earnings_date, setup.dte)
+                continue
+
             setups.append(setup)
         except Exception as e:
             logger.warning("200W bounce structure failed for %s: %s", symbol, e)

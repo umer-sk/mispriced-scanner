@@ -74,7 +74,7 @@ def test_two_failures_is_tier_c():
 
 def test_dte_outside_window_is_tier_c():
     assert classify(_base(dte_at_entry=12))[0] == "C"
-    assert classify(_base(dte_at_entry=60))[0] == "C"
+    assert classify(_base(dte_at_entry=70))[0] == "C"
 
 
 def test_technical_quality_uses_signal_count_threshold():
@@ -114,29 +114,29 @@ def test_spread_max_pct_boundary_fail():
 
 
 def test_dte_min_boundary_pass():
-    """dte_at_entry exactly at 25 should PASS (operator is <=)."""
-    tier, failed = classify(_base(dte_at_entry=25))
+    """dte_at_entry exactly at 30 should PASS (operator is <=)."""
+    tier, failed = classify(_base(dte_at_entry=30))
     assert tier == "A"
     assert failed == []
 
 
 def test_dte_min_boundary_fail():
-    """dte_at_entry at 24 should FAIL as sole Tier C."""
-    tier, failed = classify(_base(dte_at_entry=24))
+    """dte_at_entry at 29 should FAIL as sole Tier C."""
+    tier, failed = classify(_base(dte_at_entry=29))
     assert tier == "C"
     assert failed == ["dte"]
 
 
 def test_dte_max_boundary_pass():
-    """dte_at_entry exactly at 45 should PASS (operator is <=)."""
-    tier, failed = classify(_base(dte_at_entry=45))
+    """dte_at_entry exactly at 60 should PASS (operator is <=)."""
+    tier, failed = classify(_base(dte_at_entry=60))
     assert tier == "A"
     assert failed == []
 
 
 def test_dte_max_boundary_fail():
-    """dte_at_entry at 46 should FAIL as sole Tier C."""
-    tier, failed = classify(_base(dte_at_entry=46))
+    """dte_at_entry at 61 should FAIL as sole Tier C."""
+    tier, failed = classify(_base(dte_at_entry=61))
     assert tier == "C"
     assert failed == ["dte"]
 
@@ -242,3 +242,45 @@ def test_rr_gate_falls_back_to_the_default_minimum_without_the_override():
     tier, failed = classify(_base(rr_ratio=1.72))
     assert tier == "C"
     assert "rr" in failed
+
+
+def test_quality_gate_uses_the_bounce_minimum_when_present():
+    # A normalised bounce dict carries quality_min=4 (BOUNCE_QUALITY_MIN),
+    # not the shared technical minimum of 5 — the bounce's signal_count is
+    # hardcoded to 4 (its own 4 qualifying criteria, not a fraction of 7), so
+    # without this override every bounce position permanently fails the
+    # quality gate outright rather than landing in the intended tautological
+    # pass.
+    tier, failed = classify(_base(source="technical", quality=4, quality_min=4, quality_near=1))
+    assert tier == "A"
+    assert "quality" not in failed
+
+
+def test_quality_gate_falls_back_to_the_default_minimum_without_the_override():
+    tier, failed = classify(_base(source="technical", quality=4))
+    assert tier == "B"          # 4 is within QUALITY_NEAR["technical"]=1 of the default min 5
+    assert failed == ["quality"]
+
+
+def test_spread_gate_uses_the_override_when_present():
+    tier, failed = classify(_base(long_leg_spread_pct=10.0, short_leg_spread_pct=0.0, spread_max=12.0))
+    assert tier == "A"
+    assert "liquidity" not in failed
+
+
+def test_spread_gate_falls_back_to_the_default_maximum_without_the_override():
+    tier, failed = classify(_base(long_leg_spread_pct=10.0, short_leg_spread_pct=0.0))
+    assert "liquidity" in failed
+
+
+def test_breakeven_gate_uses_the_override_when_present():
+    # A single-leg long call/CELT LEAP's breakeven (extrinsic/spot exactly)
+    # runs far wider than a spread's — see _BREAKEVEN_BANDS.
+    tier, failed = classify(_base(breakeven_move_pct=8.0, breakeven_max=10.0, breakeven_near=15.0))
+    assert tier == "A"
+    assert "breakeven" not in failed
+
+
+def test_breakeven_gate_falls_back_to_the_default_band_without_the_override():
+    tier, failed = classify(_base(breakeven_move_pct=8.0))
+    assert "breakeven" in failed

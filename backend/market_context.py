@@ -1,5 +1,8 @@
 """
-Market context: VIX regime assessment, skip recommendation, token expiry check.
+Market context: regime assessment from QQQ's own ATM implied vol (NOT a real
+VIX reading — QQQ is a single large-cap tech-heavy ETF, not the broad market,
+and its own IV typically runs at different levels than VIX), skip
+recommendation, token expiry check.
 """
 import json
 import logging
@@ -138,7 +141,13 @@ def _fetch_index_mas() -> dict:
 def get_market_context(qqq_chain: Optional[OptionChainData] = None) -> MarketContext:
     """
     Assess overall market conditions and generate skip recommendation.
-    Uses QQQ IV30 as VIX proxy.
+
+    Uses QQQ's own blended ATM IV30, not a real VIX reading — the regime
+    thresholds below (35/30/20/25) were originally calibrated against VIX
+    levels and have not been re-derived for QQQ's own IV distribution, which
+    typically runs at different levels. Kept as-is rather than guessed at
+    without data; MarketContext.vix_level/vix_trend keep those field names
+    for frontend compatibility even though they measure QQQ IV, not VIX.
     """
     now_utc = datetime.now(timezone.utc)
     market_open = _is_market_open()
@@ -206,9 +215,9 @@ def get_market_context(qqq_chain: Optional[OptionChainData] = None) -> MarketCon
     if iv_spiking:
         skip_today = True
         skip_reason = (
-            "VIX spiking — IV elevated across the board. Long call spreads "
-            "cost more and need bigger moves to profit. Consider waiting "
-            "for vol to normalize."
+            "QQQ's own IV spiking — options elevated across the board. Long "
+            "call spreads cost more and need bigger moves to profit. "
+            "Consider waiting for vol to normalize."
         )
     elif qqq_iv_pct > 30:
         skip_today = True

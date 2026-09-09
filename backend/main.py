@@ -23,7 +23,7 @@ from slowapi.util import get_remote_address
 
 load_dotenv()
 
-from catalyst import get_catalyst_context
+from catalyst import _fetch_dividend_yield, _fetch_earnings_date, get_catalyst_context
 from market_context import _token_age_days, get_market_context
 from models import MarketContext, SectorData, TradeSetup
 from qqq_holdings import QQQ_TOP50
@@ -169,9 +169,15 @@ async def _run_scan_inner() -> None:
             if chain.stock_price == 0:
                 continue
             chains_ok += 1
-            catalyst = get_catalyst_context(chain.symbol, chain, trade_dte=35)
+            earnings_date = _fetch_earnings_date(chain.symbol)
+            dividend_yield = _fetch_dividend_yield(chain.symbol, chain.stock_price)
+            catalyst = get_catalyst_context(
+                chain.symbol, chain, trade_dte=35, real_earnings_date=earnings_date,
+            )
             tech_ctx = tech_contexts.get(chain.symbol)
-            setups = run_all_detectors(chain, catalyst, technical_context=tech_ctx)
+            setups = run_all_detectors(
+                chain, catalyst, technical_context=tech_ctx, dividend_yield=dividend_yield,
+            )
             all_setups.extend(setups)
 
         # 6. Filter
@@ -193,8 +199,16 @@ async def _run_scan_inner() -> None:
                 "40-54": sum(1 for s in scores if 40 <= s < 55),
                 "<40":   sum(1 for s in scores if s < 40),
             },
+            # all_setups is post-merge — count over contributing_detectors
+            # (falling back to signal.detector for any setup that somehow
+            # skipped the merge) so a setup two detectors independently
+            # confirmed counts once per detector here, not zero times for
+            # whichever one wasn't picked as the representative.
             "by_detector": {
-                det: sum(1 for s in all_setups if s.signal.detector == det)
+                det: sum(
+                    1 for s in all_setups
+                    if det in (s.contributing_detectors or [s.signal.detector])
+                )
                 for det in ["iv_rank", "skew", "parity", "term", "move",
                             "put_iv_rank", "skew_inversion", "put_parity", "downside_move"]
             },
@@ -259,7 +273,14 @@ async def _run_celt_scan() -> None:
         logger.info("Starting CELT scan of %d symbols", len(QQQ_TOP50))
         try:
             loop = asyncio.get_running_loop()
-            setups = await loop.run_in_executor(None, scan_celt_setups, QQQ_TOP50)
+            # get_market_context(None) needs no QQQ option chain — it uses
+            # the hourly-cached yfinance SPY/QQQ download and early-returns —
+            # so this costs no extra Schwab call. Feeds CELT's systemic
+            # (QQQ vs its own MA50) prerequisite; see scan_celt_setups.
+            market_ctx = await loop.run_in_executor(None, get_market_context, None)
+            setups = await loop.run_in_executor(
+                None, scan_celt_setups, QQQ_TOP50, market_ctx.qqq_price, market_ctx.qqq_ma50,
+            )
             now_ts = datetime.now(timezone.utc)
             # Recorded unconditionally — the scan *completed* whether or not it
             # found anything. celt_timestamp below only advances on a non-empty
@@ -283,6 +304,7 @@ async def _run_celt_scan() -> None:
             _cache["celt_timestamp"] = now_ts
             _cache["last_scan_error"] = None
             save_scan_results("celt_results", [_serialize(s) for s in setups], now_ts)
+            await loop.run_in_executor(None, snapshot_setups, setups, "celt")
             elapsed = time.monotonic() - t_start
             logger.info("CELT scan complete: %d setups, %.1fs", len(setups), elapsed)
         except Exception as e:
@@ -551,13 +573,20 @@ async def get_opportunities(
 ):
     opps = _cache["opportunities"]
 
-    # Apply filters
+    # Apply filters. contributing_detectors (falling back to the single
+    # signal.detector for a setup that predates that field, e.g. a stale
+    # Supabase-cached row) — filtering on the exact signal.detector alone
+    # would make a merged setup unreachable by any detector except whichever
+    # one happened to end up as its representative.
     filtered = [
         s for s in opps
         if _attr(s, 'rr_ratio', default=0) >= min_rr
         and _attr(s, 'net_debit', default=999) <= max_debit
         and _attr(s, 'score', default=0) >= min_score
-        and (detector == "all" or _attr(s, 'signal', 'detector', default='') == detector)
+        and (detector == "all" or detector in (
+            _attr(s, 'contributing_detectors', default=None)
+            or [_attr(s, 'signal', 'detector', default='')]
+        ))
         and (
             direction == "both"
             or (direction == "bullish" and _attr(s, 'structure', default='') in ("bull_call_spread", "calendar", "long_call"))

@@ -35,10 +35,17 @@ def _bounce_series(
       those 190 shared points and solving for the disjoint 10-point blocks on
       each side pins both means exactly, regardless of parameters.
     """
+    # _score_200w_bounce always drops the most recent bar (it may still be an
+    # in-progress week) before doing anything else, so every return here
+    # appends one extra placeholder bar the function will immediately strip
+    # — keeping this function's careful n-length exact-control math aligned
+    # with what the function actually evaluates, without rewriting the index
+    # math below for an n+1 world.
     P, K = MA_200W_PERIOD, MA_200W_SLOPE_LOOKBACK
     needed = P + K
     if n < needed:
-        return [100.0] * n, [100.0] * n   # too short to matter; content irrelevant
+        closes, lows = [100.0] * n, [100.0] * n   # too short to matter; content irrelevant
+        return closes + closes[-1:], lows + lows[-1:]
 
     pad = n - needed
     mid_n = P - K
@@ -73,7 +80,7 @@ def _bounce_series(
     touch_idx = n - 1 - weeks_since_touch
     lows[touch_idx] = ma_now * (1 + touch_pct / 100)
 
-    return closes, lows
+    return closes + closes[-1:], lows + lows[-1:]
 
 
 def test_qualifying_bounce_returns_facts():
@@ -182,6 +189,35 @@ def test_already_extended_far_above_is_rejected():
     # The name that already ran 25% off the level — you missed the entry.
     closes, lows = _bounce_series(extension_pct=25.0)
     assert _score_200w_bounce(closes, lows) is None
+
+
+def test_ignores_the_most_recent_possibly_incomplete_bar():
+    """The most recent bar must never influence the result — only bars up to
+    the last CLOSED week matter. _bounce_series already appends one trailing
+    placeholder bar that _score_200w_bounce drops (see its docstring);
+    replace that placeholder's value with something wildly disqualifying —
+    the effective (real, n-length) series being analyzed is unchanged, only
+    the discarded bar differs, so the result must be identical either way."""
+    closes, lows = _bounce_series()
+    baseline = _score_200w_bounce(closes, lows)
+    assert baseline is not None
+
+    disqualifying_closes = closes[:-1] + [closes[-2] * 10]
+    disqualifying_lows = lows[:-1] + [lows[-2] * 10]
+    assert _score_200w_bounce(disqualifying_closes, disqualifying_lows) == baseline
+
+
+def test_touch_deeper_than_the_floor_is_rejected():
+    # A full crash-through (pierced more than 20% below the MA) isn't a
+    # routine "touch and bounce" — that population belongs to CELT's deep-
+    # drawdown detection, not this detector.
+    closes, lows = _bounce_series(touch_pct=-25.0)
+    assert _score_200w_bounce(closes, lows) is None
+
+
+def test_touch_just_inside_the_floor_is_accepted():
+    closes, lows = _bounce_series(touch_pct=-19.9)
+    assert _score_200w_bounce(closes, lows) is not None
 
 
 def test_mismatched_lengths_do_not_crash():

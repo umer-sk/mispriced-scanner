@@ -41,7 +41,22 @@ def test_unpriceable_positions_are_excluded_entirely():
 def test_empty_input_does_not_divide_by_zero():
     out = aggregate([])
     assert out["overall"] == {"n": 0, "win_rate": 0.0, "avg_pnl": 0.0,
-                             "avg_mfe": 0.0, "avg_mae": 0.0}
+                             "avg_mfe": 0.0, "avg_mae": 0.0, "avg_hold_days": 0.0}
+
+
+def test_avg_hold_days_computed_from_entry_and_closed_timestamps():
+    # Contextualizes cross-structure win-rate comparisons (a 45-day spread
+    # next to a 400-day CELT LEAP in the same aggregate) — see _stats.
+    out = aggregate([
+        _p(entry_ts="2026-01-01T00:00:00+00:00", closed_ts="2026-01-11T00:00:00+00:00"),  # 10 days
+        _p(entry_ts="2026-01-01T00:00:00+00:00", closed_ts="2026-01-21T00:00:00+00:00"),  # 20 days
+    ])
+    assert out["overall"]["avg_hold_days"] == 15.0
+
+
+def test_avg_hold_days_ignores_rows_missing_either_timestamp():
+    out = aggregate([_p(entry_ts=None, closed_ts=None)])
+    assert out["overall"]["avg_hold_days"] == 0.0
 
 
 def test_target1_counts_as_open_not_closed():

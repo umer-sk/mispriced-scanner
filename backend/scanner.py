@@ -18,11 +18,13 @@ from models import (
     TechnicalContext,
     TradeSetup,
 )
+from options_math import probability_of_profit as _real_probability_of_profit
 
 logger = logging.getLogger(__name__)
 
-# Risk-free rate — update quarterly
-RISK_FREE_RATE = 0.0525
+# Risk-free rate — update quarterly. 3.89% 3-month T-bill, 2026-09-09
+# (https://tradingeconomics.com/united-states/3-month-bill-yield).
+RISK_FREE_RATE = 0.039
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +47,11 @@ def _call_put_volume_ratio(chain: OptionChainData) -> float:
     call_vol = sum(c.volume for c in chain.calls)
     put_vol = sum(c.volume for c in chain.puts)
     if put_vol == 0:
-        return 2.0  # default bullish
+        # Zero put volume backed by real call volume is a genuinely bullish
+        # read (all flow in calls). Zero volume on BOTH sides is no data at
+        # all — pre-market, or a dead name — and must not auto-pass the
+        # detector's >1.3 threshold as if it were evidence.
+        return 2.0 if call_vol >= 20 else 1.0
     return call_vol / put_vol
 
 
@@ -78,6 +84,30 @@ def _spread_pct(contract: OptionContract) -> float:
     if contract.mid == 0:
         return 1.0
     return (contract.ask - contract.bid) / contract.mid
+
+
+def _anchor_from_signal(signal: MispricingSignal) -> Optional[tuple[float, date]]:
+    """(strike, expiry) when raw_data pins the specific contract this signal
+    flagged, else None.
+
+    Only parity, put_parity, and skew's quadratic-fit branch carry a single
+    flagged contract — iv_rank, term, move, put_iv_rank, downside_move, and
+    skew's flat-curve branch are chain-wide/ATM reads with no one contract
+    to anchor to, so this returns None for them and the constructors fall
+    back to their existing free-choice strike/expiry selection unchanged.
+    Detection is by raw_data shape, not detector name, so a future detector
+    that starts carrying a strike/expiry gets anchoring for free.
+    """
+    raw = signal.raw_data
+    strike = raw.get("strike", raw.get("mispriced_strike"))
+    expiry_str = raw.get("expiry")
+    if strike is None or expiry_str is None:
+        return None
+    try:
+        expiry = date.fromisoformat(expiry_str)
+    except (TypeError, ValueError):
+        return None
+    return float(strike), expiry
 
 
 def _find_skew_contracts(
@@ -182,21 +212,31 @@ def detect_skew_anomaly(chain: OptionChainData) -> Optional[MispricingSignal]:
 
     # Anomaly Type A — flat/inverted skew: puts not commanding normal premium
     # Normal equity skew: puts 7–15% IV above calls at 10-delta. Flat = < 5%.
+    # raw_skew < 0.05 alone is directionless — it can't tell whether puts or
+    # calls moved to produce the flat reading, so skew_inversion (the
+    # bearish mirror) used to fire on this identical condition. A second,
+    # direction-specific check breaks the tie: this detector claims calls
+    # are cheap, so require the call side to specifically read cheap
+    # against the same-expiry ATM IV, not just cheap relative to puts.
     if raw_skew < 0.05:
-        return MispricingSignal(
-            symbol=chain.symbol,
-            detector="skew",
-            description=(
-                f"Flat put/call skew: {raw_skew:.1%} vs normal 7–15%. "
-                f"Put IV not commanding usual crash premium — directional risk underpriced."
-            ),
-            confidence=0.75,
-            raw_data={
-                "raw_skew": round(raw_skew, 4),
-                "put_10d_iv": round(put_10d.iv, 4),
-                "call_10d_iv": round(call_10d.iv, 4),
-            },
-        )
+        atm = _atm_contract(_contracts_for_expiry(chain.calls, call_10d.expiry), chain.stock_price)
+        if atm is not None and atm.iv > 0 and call_10d.iv < atm.iv * 0.90:
+            return MispricingSignal(
+                symbol=chain.symbol,
+                detector="skew",
+                description=(
+                    f"Flat put/call skew: {raw_skew:.1%} vs normal 7–15%. "
+                    f"Put IV not commanding usual crash premium — directional risk underpriced."
+                ),
+                confidence=0.75,
+                raw_data={
+                    "raw_skew": round(raw_skew, 4),
+                    "put_10d_iv": round(put_10d.iv, 4),
+                    "call_10d_iv": round(call_10d.iv, 4),
+                },
+            )
+        # Flat skew with neither leg individually cheap vs ATM isn't a
+        # directional anomaly — fall through to Type B instead of firing.
 
     # Anomaly Type B — specific strike mispriced via quadratic curve fit.
     # 30-DTE minimum avoids near-term weeklies that have too few OTM strikes with OI>200.
@@ -261,16 +301,22 @@ def detect_skew_anomaly(chain: OptionChainData) -> Optional[MispricingSignal]:
 # Detector 3: Put-Call Parity Violation
 # ---------------------------------------------------------------------------
 
-def detect_parity_violation(chain: OptionChainData) -> Optional[MispricingSignal]:
+def detect_parity_violation(chain: OptionChainData, dividend_yield: float = 0.0) -> Optional[MispricingSignal]:
     """
-    Mathematical arbitrage detection using put-call parity.
-    C - P = S - K * e^(-rT)
+    Mathematical arbitrage detection using put-call parity, dividend-adjusted:
+    C - P = S*e^(-qT) - K*e^(-rT). Without the e^(-qT) term this reads a
+    dividend payer's PV(dividends) as call underpricing on every strike and
+    expiry — subtracting it from spot before comparing removes that bias.
+    `dividend_yield` defaults to 0.0 so this stays network-free when called
+    directly (see catalyst._fetch_dividend_yield for where a real value
+    comes from — the caller fetches it, this function never does).
     """
     if chain.stock_price == 0:
         return None
 
     S = chain.stock_price
     r = RISK_FREE_RATE
+    q = dividend_yield
     best_violation = 0.0
     best_signal = None
 
@@ -292,14 +338,18 @@ def detect_parity_violation(chain: OptionChainData) -> Optional[MispricingSignal
         if _spread_pct(call) > 0.05 or _spread_pct(put) > 0.05:
             continue
 
-        theoretical_call = put.mid + S - K * math.exp(-r * T)
+        theoretical_call = put.mid + S * math.exp(-q * T) - K * math.exp(-r * T)
         if theoretical_call <= 0:
             continue
 
         violation_pct = (theoretical_call - call.mid) / theoretical_call
+        # A violation smaller than the round-trip cost of actually trading it
+        # isn't tradeable edge — price the trade at the ask you'd really pay,
+        # not mid, and require at least a nickel of edge past that.
+        edge = (put.bid + S * math.exp(-q * T) - K * math.exp(-r * T)) - call.ask
 
         # Only flag when call is underpriced (positive violation = call too cheap)
-        if violation_pct > 0.02 and violation_pct > best_violation:
+        if violation_pct > 0.02 and edge > 0.05 and violation_pct > best_violation:
             best_violation = violation_pct
             confidence = min(0.98, 0.70 + violation_pct * 5)
             best_signal = MispricingSignal(
@@ -341,7 +391,6 @@ def detect_term_structure_gap(
         return None
 
     S = chain.stock_price
-    today = date.today()
 
     # Minimum 14 DTE avoids same-week noise; 14-day gap filters consecutive weeklies.
     expiry_list = sorted(set(c.expiry for c in chain.calls if 14 <= c.dte <= 100))
@@ -353,11 +402,11 @@ def detect_term_structure_gap(
         return None
     expiry_2 = gap_candidates[0]
 
-    dte_1 = (expiry_1 - today).days
-    dte_2 = (expiry_2 - today).days
-
-    atm_1 = _atm_contract(chain.calls, S, dte_min=0, dte_max=dte_1)
-    atm_2 = _atm_contract(chain.calls, S, dte_min=dte_1 + 1, dte_max=dte_2)
+    # Pinned to the exact expiry, not a DTE range — a range search could grab
+    # an unrelated weekly whose naturally elevated IV masquerades as
+    # backwardation against expiry_2.
+    atm_1 = _atm_contract(_contracts_for_expiry(chain.calls, expiry_1), S)
+    atm_2 = _atm_contract(_contracts_for_expiry(chain.calls, expiry_2), S)
 
     if atm_1 is None or atm_2 is None:
         return None
@@ -529,6 +578,13 @@ def detect_skew_inversion(chain: OptionChainData) -> Optional[MispricingSignal]:
     if raw_skew >= 0.05:
         return None
 
+    # See detect_skew_anomaly for why raw_skew < 0.05 alone is directionless.
+    # This detector claims puts are cheap, so require the put side to
+    # specifically read cheap against the same-expiry ATM IV.
+    atm = _atm_contract(_contracts_for_expiry(chain.puts, put_10d.expiry), chain.stock_price)
+    if atm is None or atm.iv <= 0 or put_10d.iv >= atm.iv * 0.90:
+        return None
+
     return MispricingSignal(
         symbol=chain.symbol,
         detector="skew_inversion",
@@ -549,15 +605,19 @@ def detect_skew_inversion(chain: OptionChainData) -> Optional[MispricingSignal]:
 # Bearish Detector 3: Put-Call Parity Violation (Put Underpriced)
 # ---------------------------------------------------------------------------
 
-def detect_put_parity_violation(chain: OptionChainData) -> Optional[MispricingSignal]:
+def detect_put_parity_violation(chain: OptionChainData, dividend_yield: float = 0.0) -> Optional[MispricingSignal]:
     """
-    P = C - S + K * e^(-rT). When actual put < theoretical put, put is underpriced.
+    P = C - S*e^(-qT) + K*e^(-rT). When actual put < theoretical put, put is
+    underpriced. See detect_parity_violation for why the e^(-qT) term
+    matters — here it RAISES theoretical put value, so this fix makes
+    put_parity fire MORE often on dividend payers, not less.
     """
     if chain.stock_price == 0:
         return None
 
     S = chain.stock_price
     r = RISK_FREE_RATE
+    q = dividend_yield
     best_violation = 0.0
     best_signal = None
 
@@ -576,12 +636,13 @@ def detect_put_parity_violation(chain: OptionChainData) -> Optional[MispricingSi
         if _spread_pct(call) > 0.05 or _spread_pct(put) > 0.05:
             continue
 
-        theoretical_put = call.mid - S + K * math.exp(-r * T)
+        theoretical_put = call.mid - S * math.exp(-q * T) + K * math.exp(-r * T)
         if theoretical_put <= 0:
             continue
 
         violation_pct = (theoretical_put - put.mid) / theoretical_put
-        if violation_pct > 0.02 and violation_pct > best_violation:
+        edge = (call.bid - S * math.exp(-q * T) + K * math.exp(-r * T)) - put.ask
+        if violation_pct > 0.02 and edge > 0.05 and violation_pct > best_violation:
             best_violation = violation_pct
             confidence = min(0.98, 0.70 + violation_pct * 5)
             best_signal = MispricingSignal(
@@ -684,10 +745,13 @@ def _calc_pnl_scenarios(
             short_val = max(0.0, new_price - short_leg.strike) * 100 if short_leg else 0.0
             pnl = long_val - short_val - net_debit * 100
         else:
-            # Simplified greeks approximation
+            # Simplified greeks approximation. Gamma term added so a larger
+            # move isn't priced as if the option's delta stayed fixed —
+            # assumption-free (no IV-change forecast needed), unlike vega.
             price_change = new_price - stock_price
             long_pnl = (
                 long_leg.delta * price_change
+                + 0.5 * long_leg.gamma * price_change ** 2
                 - abs(long_leg.theta) * days
             ) * 100
 
@@ -695,6 +759,7 @@ def _calc_pnl_scenarios(
             if short_leg:
                 short_pnl = (
                     short_leg.delta * price_change
+                    + 0.5 * short_leg.gamma * price_change ** 2
                     - abs(short_leg.theta) * days
                 ) * 100
                 # Short leg profit when it loses value
@@ -735,28 +800,40 @@ def construct_best_spread(
     if S == 0:
         return None
 
-    # STEP 1 — Select expiry (28–50 DTE preferred, never < 21 or > 60)
-    # If earnings within window: prefer expiry 7–14 days AFTER earnings
-    candidate_expiries = sorted(set(c.expiry for c in chain.calls if 30 <= c.dte <= 100))
-    if not candidate_expiries:
-        return None
+    # STEP 1 — Select expiry. When the signal pins a specific contract
+    # (parity/put_parity/skew's quadratic fit — see _anchor_from_signal),
+    # honor that expiry directly rather than independently re-deriving one;
+    # otherwise fall back to the free-choice logic (28–50 DTE preferred,
+    # never < 21 or > 60; if earnings within window, prefer expiry 7–14
+    # days AFTER earnings).
+    anchor = _anchor_from_signal(signal)
 
-    selected_expiry = None
-    for exp in candidate_expiries:
-        dte = (exp - date.today()).days
-        if catalyst.earnings_date and catalyst.earnings_in_window:
-            days_after_earnings = (exp - catalyst.earnings_date).days
-            if 7 <= days_after_earnings <= 14:
+    if anchor is not None:
+        anchor_strike, selected_expiry = anchor
+        dte = (selected_expiry - date.today()).days
+        if dte <= 0:
+            return None
+    else:
+        candidate_expiries = sorted(set(c.expiry for c in chain.calls if 30 <= c.dte <= 100))
+        if not candidate_expiries:
+            return None
+
+        selected_expiry = None
+        for exp in candidate_expiries:
+            dte = (exp - date.today()).days
+            if catalyst.earnings_date and catalyst.earnings_in_window:
+                days_after_earnings = (exp - catalyst.earnings_date).days
+                if 7 <= days_after_earnings <= 14:
+                    selected_expiry = exp
+                    break
+            if 28 <= dte <= 50:
                 selected_expiry = exp
                 break
-        if 28 <= dte <= 50:
-            selected_expiry = exp
-            break
 
-    if selected_expiry is None:
-        selected_expiry = candidate_expiries[0]  # Fallback to nearest valid
+        if selected_expiry is None:
+            selected_expiry = candidate_expiries[0]  # Fallback to nearest valid
 
-    dte = (selected_expiry - date.today()).days
+        dte = (selected_expiry - date.today()).days
 
     # STEP 2 — Select strikes for bull call spread
     expiry_calls = sorted(
@@ -766,11 +843,22 @@ def construct_best_spread(
     if len(expiry_calls) < 2:
         return None
 
-    # Long leg: closest ATM at or just below stock price
-    atm_candidates = [c for c in expiry_calls if c.strike <= S * 1.02]
-    if not atm_candidates:
-        return None
-    long_leg = min(atm_candidates, key=lambda c: abs(c.strike - S))
+    if anchor is not None:
+        # Anchor the long leg to the exact contract the signal flagged.
+        # Not finding it — or failing any gate below — is a rejection, not
+        # a silent fallback to a different, unrelated contract: surfacing a
+        # different contract than the one the signal actually found is the
+        # dishonesty this anchoring exists to remove.
+        anchored = [c for c in expiry_calls if c.strike == anchor_strike]
+        if not anchored:
+            return None
+        long_leg = anchored[0]
+    else:
+        # Long leg: closest ATM at or just below stock price
+        atm_candidates = [c for c in expiry_calls if c.strike <= S * 1.02]
+        if not atm_candidates:
+            return None
+        long_leg = min(atm_candidates, key=lambda c: abs(c.strike - S))
 
     # Short leg: target delta 0.20–0.25 (typically 8–15% OTM)
     short_candidates = [
@@ -812,7 +900,13 @@ def construct_best_spread(
     breakeven = round(long_leg.strike + net_debit, 2)
     breakeven_move_pct = round((breakeven - S) / S * 100, 2)
     rr_ratio = round(max_gain / max_loss, 2) if max_loss > 0 else 0.0
-    prob_profit = round(abs(long_leg.delta) * 100, 1)
+    # P(finish beyond breakeven at expiry), not P(finish ITM at all) — |delta|
+    # is the latter, which is always a looser (higher) bar than the former
+    # for a purchased option. mu=0: no directional forecast beyond what the
+    # mispricing thesis itself implies. Falls back to the delta proxy only
+    # if the real model can't run (degenerate inputs).
+    pop = _real_probability_of_profit(S, breakeven, dte, long_leg.iv, is_put=False)
+    prob_profit = round(pop * 100, 1) if pop is not None else round(abs(long_leg.delta) * 100, 1)
 
     # STEP 3 — Greeks
     net_delta = round(long_leg.delta - short_leg.delta, 3)
@@ -833,10 +927,15 @@ def construct_best_spread(
     if (long_leg.open_interest < 100 or short_leg.open_interest < 100
             or long_spread_pct > 15.0 or short_spread_pct > 15.0):
         return None
+    # Volume is excluded here too, for the same reason as the hard gate
+    # above: it's 0 pre-market, and this flag gates whether a setup surfaces
+    # at all (main.py's 08:00 ET scan) — requiring volume>=50 made every
+    # pre-market run come back empty regardless of real OI/spread quality.
+    # long_leg_volume stays a separate scoring signal (score_swing_quality's
+    # "long_leg_volume >= 200" bonus), it just no longer gates tradability.
     liquidity_ok = (
         long_leg.open_interest >= 100
         and short_leg.open_interest >= 100
-        and long_leg.volume >= 50
         and long_spread_pct <= 10.0
         and short_spread_pct <= 10.0
     )
@@ -848,7 +947,11 @@ def construct_best_spread(
         return None
     if breakeven_move_pct > 10.0:
         return None
-    if not (30 <= dte <= 100):
+    # Matches forward_test.py's DTE_MIN/DTE_MAX exactly — the two bands move
+    # together, or this constructor can emit setups the forward test will
+    # always Tier-C on a pure timing mismatch that has nothing to do with
+    # trade quality.
+    if not (30 <= dte <= 60):
         return None
 
     # STEP 7 — Broker order string
@@ -923,26 +1026,36 @@ def construct_bear_put_spread(
     if S == 0:
         return None
 
-    # STEP 1 — Select expiry (30–50 DTE preferred)
-    candidate_expiries = sorted(set(c.expiry for c in chain.puts if 30 <= c.dte <= 100))
-    if not candidate_expiries:
-        return None
+    # STEP 1 — Select expiry. Anchored expiry from the signal (see
+    # construct_best_spread for the same pattern) when one is available,
+    # otherwise the free-choice logic (30–50 DTE preferred).
+    anchor = _anchor_from_signal(signal)
 
-    selected_expiry = None
-    for exp in candidate_expiries:
-        dte = (exp - date.today()).days
-        if catalyst.earnings_date and catalyst.earnings_in_window:
-            days_after_earnings = (exp - catalyst.earnings_date).days
-            if 7 <= days_after_earnings <= 14:
+    if anchor is not None:
+        anchor_strike, selected_expiry = anchor
+        dte = (selected_expiry - date.today()).days
+        if dte <= 0:
+            return None
+    else:
+        candidate_expiries = sorted(set(c.expiry for c in chain.puts if 30 <= c.dte <= 100))
+        if not candidate_expiries:
+            return None
+
+        selected_expiry = None
+        for exp in candidate_expiries:
+            dte = (exp - date.today()).days
+            if catalyst.earnings_date and catalyst.earnings_in_window:
+                days_after_earnings = (exp - catalyst.earnings_date).days
+                if 7 <= days_after_earnings <= 14:
+                    selected_expiry = exp
+                    break
+            if 30 <= dte <= 50:
                 selected_expiry = exp
                 break
-        if 30 <= dte <= 50:
-            selected_expiry = exp
-            break
-    if selected_expiry is None:
-        selected_expiry = candidate_expiries[0]
+        if selected_expiry is None:
+            selected_expiry = candidate_expiries[0]
 
-    dte = (selected_expiry - date.today()).days
+        dte = (selected_expiry - date.today()).days
 
     # STEP 2 — Select strikes
     expiry_puts = sorted(
@@ -953,11 +1066,19 @@ def construct_bear_put_spread(
     if len(expiry_puts) < 2:
         return None
 
-    # Long leg: ATM or slightly OTM put (strike at or just below S)
-    atm_candidates = [c for c in expiry_puts if c.strike >= S * 0.98]
-    if not atm_candidates:
-        return None
-    long_leg = min(atm_candidates, key=lambda c: abs(c.strike - S))
+    if anchor is not None:
+        # See construct_best_spread: anchor failure is a rejection, not a
+        # fallback to an unrelated contract.
+        anchored = [c for c in expiry_puts if c.strike == anchor_strike]
+        if not anchored:
+            return None
+        long_leg = anchored[0]
+    else:
+        # Long leg: ATM or slightly OTM put (strike at or just below S)
+        atm_candidates = [c for c in expiry_puts if c.strike >= S * 0.98]
+        if not atm_candidates:
+            return None
+        long_leg = min(atm_candidates, key=lambda c: abs(c.strike - S))
 
     # Short leg: further OTM put, delta 0.15–0.30 (lower strike)
     short_candidates = [
@@ -988,7 +1109,9 @@ def construct_bear_put_spread(
     breakeven = round(long_leg.strike - net_debit, 2)
     breakeven_move_pct = round((S - breakeven) / S * 100, 2)
     rr_ratio = round(max_gain / max_loss, 2) if max_loss > 0 else 0.0
-    prob_profit = round(abs(long_leg.delta) * 100, 1)
+    # See construct_best_spread for why this replaces the |delta| proxy.
+    pop = _real_probability_of_profit(S, breakeven, dte, long_leg.iv, is_put=True)
+    prob_profit = round(pop * 100, 1) if pop is not None else round(abs(long_leg.delta) * 100, 1)
 
     # STEP 3 — Greeks
     net_delta = round(long_leg.delta - short_leg.delta, 3)
@@ -1009,12 +1132,20 @@ def construct_bear_put_spread(
                 pnl = long_val - short_val - net_debit * 100
             else:
                 price_change = new_price - S
-                long_pnl = (long_leg.delta * price_change - abs(long_leg.theta) * days) * 100
+                long_pnl = (
+                    long_leg.delta * price_change
+                    + 0.5 * long_leg.gamma * price_change ** 2
+                    - abs(long_leg.theta) * days
+                ) * 100
                 # Already negated on this line — this IS the short position's
                 # P&L, so it must be ADDED. Subtracting it double-counted the
                 # short leg, inflating every bear 5d/10d scenario by 2× that
                 # leg while the at-expiry table above stayed correct.
-                short_pnl = -(short_leg.delta * price_change - abs(short_leg.theta) * days) * 100
+                short_pnl = -(
+                    short_leg.delta * price_change
+                    + 0.5 * short_leg.gamma * price_change ** 2
+                    - abs(short_leg.theta) * days
+                ) * 100
                 pnl = long_pnl + short_pnl
             pnl_pct = (pnl / (net_debit * 100)) * 100 if net_debit > 0 else 0.0
             out.append(PnLScenario(
@@ -1042,7 +1173,8 @@ def construct_bear_put_spread(
     # STEP 6 — Quality gates
     if rr_ratio < 2.0 or net_debit > 8.0 or breakeven_move_pct > 10.0:
         return None
-    if not (30 <= dte <= 100):
+    # See construct_best_spread — matches forward_test.py's DTE band exactly.
+    if not (30 <= dte <= 60):
         return None
 
     # STEP 7 — Order string
@@ -1085,6 +1217,60 @@ def construct_bear_put_spread(
 
 
 # ---------------------------------------------------------------------------
+# Mispricing-quality points (shared by score_swing_quality and
+# compute_score_breakdown, so they can't disagree on how detector-merging
+# affects the score)
+# ---------------------------------------------------------------------------
+
+_MISPRICING_CAP = 35
+
+
+def _mispricing_points(detectors: list[str], raw_data: dict) -> tuple[int, list[dict]]:
+    """Mispricing-quality score contribution, capped at 35 total (matches the
+    original single-detector design's ceiling: 20 detector + 15 iv_rank).
+
+    Each distinct detector CATEGORY present contributes once — parity and
+    put_parity together are one category (20 pts), skew/skew_inversion
+    another (10), move/downside_move another (10). A single TradeSetup can
+    only ever contain detectors from one side (bullish OR bearish — they're
+    built by different constructors from different detector lists), so a
+    bullish and bearish variant of the same category never coexist here.
+    Independent detectors converging on the identical physical trade is real
+    confirming evidence, not double-counting, since each checks a genuinely
+    different mispricing axis — but it's still capped, so three detectors
+    firing on one trade can't push mispricing quality past what the original
+    35-point design allowed for.
+
+    iv_rank is a raw_data reading, not a detector name, so it's checked
+    separately here rather than folded into the category logic above.
+    """
+    present = set(detectors)
+    items: list[dict] = []
+    if present & {"parity", "put_parity"}:
+        label = "Parity violation" if "parity" in present else "Put parity violation"
+        items.append({"label": label, "pts": 20})
+    if present & {"skew", "skew_inversion"}:
+        items.append({"label": "Skew anomaly", "pts": 10})
+    if present & {"move", "downside_move"}:
+        items.append({"label": "Move underpricing", "pts": 10})
+    if raw_data.get("iv_rank", 100) < 20:
+        items.append({"label": "IV rank < 20", "pts": 15})
+
+    raw_total = sum(i["pts"] for i in items)
+    if raw_total > _MISPRICING_CAP:
+        items.append({"label": "Mispricing quality capped at 35", "pts": _MISPRICING_CAP - raw_total})
+    return min(raw_total, _MISPRICING_CAP), items
+
+
+def _setup_detectors(setup: TradeSetup) -> list[str]:
+    """contributing_detectors when the setup went through run_all_detectors'
+    merge step, else the single signal.detector — keeps score_swing_quality/
+    compute_score_breakdown correct for a TradeSetup built directly (tests,
+    or any future caller that bypasses run_all_detectors)."""
+    return setup.contributing_detectors or [setup.signal.detector]
+
+
+# ---------------------------------------------------------------------------
 # Swing Quality Scorer
 # ---------------------------------------------------------------------------
 
@@ -1098,20 +1284,9 @@ def score_swing_quality(setup: TradeSetup) -> int:
     if setup.catalyst.iv_expansion_likely:
         score += 20
 
-    # Mispricing quality (35 pts max). The bearish detectors are the mirrors
-    # of the bullish ones and must score identically — crediting only the
-    # bullish names left every bearish setup 20 points short of an otherwise
-    # identical bullish one, and disagreed with compute_score_breakdown below.
-    if setup.signal.detector in ("parity", "put_parity"):
-        score += 20
-    if setup.signal.detector in ("skew", "skew_inversion"):
-        score += 10
-    if setup.signal.detector in ("move", "downside_move"):
-        score += 10
-
-    # IV rank from chain data
-    if setup.signal.raw_data.get("iv_rank", 100) < 20:
-        score += 15
+    # Mispricing quality (35 pts max) — see _mispricing_points.
+    mispricing_pts, _ = _mispricing_points(_setup_detectors(setup), setup.signal.raw_data)
+    score += mispricing_pts
 
     # Trade structure quality (30 pts max)
     if setup.rr_ratio >= 3.0:
@@ -1133,13 +1308,9 @@ def score_swing_quality(setup: TradeSetup) -> int:
     if 28 <= setup.dte <= 50:
         score += 10
 
-    # Penalties
-    if setup.dte < 30:
-        score -= 20
-    if setup.rr_ratio < 2.0:
-        score -= 30
-    if setup.net_debit > 8.00:
-        score -= 15
+    # Penalty. (dte<30 / rr_ratio<2.0 / net_debit>8.00 were removed — all
+    # three are already excluded by the constructors' own hard gates and can
+    # never fire; only the spread-width penalty below is reachable.)
     if setup.long_leg_spread_pct > 8.0:
         score -= 10
 
@@ -1158,16 +1329,10 @@ def compute_score_breakdown(setup: TradeSetup) -> list[dict]:
         items.append({"label": "Earnings in window", "pts": 25})
     if setup.catalyst.iv_expansion_likely:
         items.append({"label": "IV expansion likely", "pts": 20})
-    if setup.signal.detector == "parity":
-        items.append({"label": "Parity violation", "pts": 20})
-    if setup.signal.detector == "put_parity":
-        items.append({"label": "Put parity violation", "pts": 20})
-    if setup.signal.raw_data.get("iv_rank", 100) < 20:
-        items.append({"label": "IV rank < 20", "pts": 15})
-    if setup.signal.detector in ("skew", "skew_inversion"):
-        items.append({"label": "Skew anomaly", "pts": 10})
-    if setup.signal.detector in ("move", "downside_move"):
-        items.append({"label": "Move underpricing", "pts": 10})
+
+    _, mispricing_items = _mispricing_points(_setup_detectors(setup), setup.signal.raw_data)
+    items.extend(mispricing_items)
+
     if setup.rr_ratio >= 3.0:
         items.append({"label": "R:R ≥ 3.0", "pts": 20})
     elif setup.rr_ratio >= 2.0:
@@ -1200,6 +1365,7 @@ def run_all_detectors(
     catalyst: "CatalystContext",
     technical_context: Optional["TechnicalContext"] = None,
     direction: str = "both",
+    dividend_yield: float = 0.0,
 ) -> list[TradeSetup]:
     """
     Run detectors based on direction:
@@ -1207,6 +1373,8 @@ def run_all_detectors(
       - "bearish": put detectors only → bear put spread
       - "both": all 9 detectors, each routed to its spread type
     direction defaults to "both"; overridden by technical_context.bias when provided.
+    dividend_yield: see catalyst._fetch_dividend_yield — only the two parity
+    detectors use it.
     """
     effective_direction = direction
     if technical_context is not None and direction == "both":
@@ -1218,14 +1386,14 @@ def run_all_detectors(
     bullish_detectors = [
         detect_iv_rank_cheap(chain),
         detect_skew_anomaly(chain),
-        detect_parity_violation(chain),
+        detect_parity_violation(chain, dividend_yield=dividend_yield),
         detect_term_structure_gap(chain, earnings_date=catalyst.earnings_date),
         detect_move_underpricing(chain),
     ]
     bearish_detectors = [
         detect_put_iv_rank_cheap(chain),
         detect_skew_inversion(chain),
-        detect_put_parity_violation(chain),
+        detect_put_parity_violation(chain, dividend_yield=dividend_yield),
         detect_downside_move_underpricing(chain),
     ]
 
@@ -1239,19 +1407,45 @@ def run_all_detectors(
             [(s, construct_bear_put_spread) for s in bearish_detectors if s]
         )
 
-    setups = []
+    raw_setups: list[TradeSetup] = []
     for signal, constructor in signals_with_constructor:
         setup = constructor(signal, chain, catalyst)
         if setup is None:
             continue
-        setup.score = score_swing_quality(setup)
-        setup.score_breakdown = compute_score_breakdown(setup)
         if technical_context is not None:
             setup.technical_context = technical_context
-        setups.append(setup)
+        raw_setups.append(setup)
+
+    # Detectors don't use `signal` to choose market data (anchoring aside),
+    # so unrelated detectors checking unrelated conditions can legitimately
+    # construct the exact same trade. Group by the physical trade rather than
+    # surfacing — and forward-testing — the same contract once per co-firing
+    # detector.
+    groups: dict[tuple, list[TradeSetup]] = {}
+    for s in raw_setups:
+        key = (s.structure, s.expiry, s.long_strike, s.short_strike)
+        groups.setdefault(key, []).append(s)
+
+    setups: list[TradeSetup] = []
+    for group in groups.values():
+        # Lowest confidence first, so the highest-confidence signal's
+        # raw_data wins any key collision in the merge below.
+        group.sort(key=lambda s: s.signal.confidence)
+        representative = group[-1]
+
+        merged_raw_data: dict = {}
+        for s in group:
+            merged_raw_data.update(s.signal.raw_data)
+        representative.signal.raw_data = merged_raw_data
+        representative.contributing_detectors = sorted({s.signal.detector for s in group})
+
+        representative.score = score_swing_quality(representative)
+        representative.score_breakdown = compute_score_breakdown(representative)
+        setups.append(representative)
         logger.info(
             "%s [%s] → score=%d rr=%.2f debit=$%.2f",
-            chain.symbol, signal.detector, setup.score, setup.rr_ratio, setup.net_debit,
+            chain.symbol, "+".join(representative.contributing_detectors),
+            representative.score, representative.rr_ratio, representative.net_debit,
         )
 
     return setups

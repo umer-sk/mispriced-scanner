@@ -127,42 +127,56 @@ def test_wide_leap_is_rejected():
     market makes the displayed entry meaningfully better than the real one."""
     wide = _c(100, 400, bid=9.0, ask=11.0)      # 20% of mid
     assert _spread_pct(wide) > LEAP_MAX_SPREAD_PCT
-    assert _find_best_leap([wide]) is None
+    assert _find_best_leap([wide], stock_price=120.0) is None
 
 
 def test_tight_leap_is_accepted():
     tight = _c(100, 400, bid=9.9, ask=10.1)     # 2%
-    assert _find_best_leap([tight]) is tight
+    assert _find_best_leap([tight], stock_price=120.0) is tight
 
 
 def test_spread_gate_applies_to_the_relaxed_fallback_too():
     # OI 200 and delta 0.88 only match the relaxed branch; the spread gate
     # must still bite there, or the fallback becomes an escape hatch.
     wide = _c(100, 400, delta=0.88, oi=200, bid=9.0, ask=11.0)
-    assert _find_best_leap([wide]) is None
+    assert _find_best_leap([wide], stock_price=120.0) is None
 
 
 def test_boundary_spread_is_accepted():
     at_limit = _c(100, 400, bid=9.25, ask=10.75)   # exactly 15.0% of mid 10.0
     assert _spread_pct(at_limit) == LEAP_MAX_SPREAD_PCT
-    assert _find_best_leap([at_limit]) is at_limit
+    assert _find_best_leap([at_limit], stock_price=120.0) is at_limit
 
 
 def test_deepest_itm_still_wins_among_tradeable_candidates():
     shallow = _c(100, 400, delta=0.68, bid=9.9, ask=10.1)
     deep = _c(80, 400, delta=0.83, bid=19.9, ask=20.1)
-    assert _find_best_leap([shallow, deep]) is deep
+    assert _find_best_leap([shallow, deep], stock_price=120.0) is deep
 
 
 def test_a_wide_deep_leg_does_not_beat_a_tight_shallow_one():
     # The old code would have picked the deep one on delta alone.
     tight_shallow = _c(100, 400, delta=0.68, bid=9.9, ask=10.1)
     wide_deep = _c(80, 400, delta=0.83, bid=18.0, ask=22.0)   # 20%
-    assert _find_best_leap([tight_shallow, wide_deep]) is tight_shallow
+    assert _find_best_leap([tight_shallow, wide_deep], stock_price=120.0) is tight_shallow
 
 
 def test_short_dated_calls_are_never_leaps():
-    assert _find_best_leap([_c(100, 200, delta=0.75, bid=9.9, ask=10.1)]) is None
+    assert _find_best_leap([_c(100, 200, delta=0.75, bid=9.9, ask=10.1)], stock_price=120.0) is None
+
+
+def test_shallow_itm_leap_rejected_despite_qualifying_delta():
+    """A contract can sit inside the 0.65-0.85 delta band while barely being
+    ITM at all when IV is high — verified in celt_scanner.py's comment on
+    LEAP_MAX_MONEYNESS. The moneyness gate must reject it even though delta
+    alone would accept it."""
+    shallow = _c(98, 400, delta=0.70, bid=9.9, ask=10.1)  # 98/100 = 0.98, > 0.85
+    assert _find_best_leap([shallow], stock_price=100.0) is None
+
+
+def test_deep_itm_leap_within_moneyness_is_accepted():
+    deep = _c(80, 400, delta=0.70, bid=19.9, ask=20.1)  # 80/100 = 0.80, within 0.85
+    assert _find_best_leap([deep], stock_price=100.0) is deep
 
 
 # ─── composition: the wiring, not just the helpers ───────────────────────────
@@ -267,9 +281,10 @@ def test_scan_wires_front_month_iv_into_the_score(monkeypatch):
         stock_price=spot, iv30=0.68, iv_rank=55.0,                   # misleading blend
     )
     monkeypatch.setattr(cs, "_fetch_closes", lambda syms: {"NVDA": closes})
-    monkeypatch.setattr(cs, "fetch_option_chain", lambda sym, days_out=105: chain)
+    monkeypatch.setattr(cs, "fetch_option_chain", lambda sym, days_out=105, strike_count=20: chain)
+    monkeypatch.setattr(cs, "_fetch_earnings_date", lambda sym: None)
 
-    setups = cs.scan_celt_setups(["NVDA"])
+    setups = cs.scan_celt_setups(["NVDA"], qqq_price=400.0, qqq_ma50=450.0)
 
     assert len(setups) == 1, "a 45% drawdown with 120% front IV must qualify"
     s = setups[0]
@@ -298,13 +313,93 @@ def test_leap_occ_is_built_when_the_contract_carries_no_occ_symbol(monkeypatch):
         stock_price=spot, iv30=0.68, iv_rank=55.0,
     )
     monkeypatch.setattr(cs, "_fetch_closes", lambda syms: {"NVDA": closes})
-    monkeypatch.setattr(cs, "fetch_option_chain", lambda sym, days_out=105: chain)
+    monkeypatch.setattr(cs, "fetch_option_chain", lambda sym, days_out=105, strike_count=20: chain)
+    monkeypatch.setattr(cs, "_fetch_earnings_date", lambda sym: None)
 
-    setups = cs.scan_celt_setups(["NVDA"])
+    setups = cs.scan_celt_setups(["NVDA"], qqq_price=400.0, qqq_ma50=450.0)
 
     assert len(setups) == 1
     expected = build_occ("NVDA", leap.expiry, False, leap.strike)
     assert setups[0].leap_occ == expected
+
+
+def test_scan_returns_nothing_when_qqq_is_not_below_its_own_ma50(monkeypatch):
+    """Even a perfectly qualifying single-name crash must not fire when the
+    broader market isn't stressed — this is the systemic-vs-idiosyncratic
+    gate, verified against the exact chain that qualifies in
+    test_scan_wires_front_month_iv_into_the_score."""
+    import celt_scanner as cs
+
+    closes = _crash_closes()
+    spot = closes[-1]
+    chain = _chain(
+        calls=[
+            _c(spot, 30, iv=1.20), _c(spot, 35, iv=1.15),
+            _c(spot * 0.6, 400, iv=0.45, delta=0.80,
+               bid=spot * 0.42, ask=spot * 0.43, oi=2000),
+        ],
+        stock_price=spot, iv30=0.68, iv_rank=55.0,
+    )
+    monkeypatch.setattr(cs, "_fetch_closes", lambda syms: {"NVDA": closes})
+    monkeypatch.setattr(cs, "fetch_option_chain", lambda sym, days_out=105, strike_count=20: chain)
+    monkeypatch.setattr(cs, "_fetch_earnings_date", lambda sym: None)
+
+    # QQQ above its own MA50 — no market-wide stress.
+    assert cs.scan_celt_setups(["NVDA"], qqq_price=460.0, qqq_ma50=450.0) == []
+    # Confirm the SAME chain does qualify once QQQ is below its MA50.
+    assert len(cs.scan_celt_setups(["NVDA"], qqq_price=400.0, qqq_ma50=450.0)) == 1
+
+
+def test_scan_fails_closed_when_qqq_ma50_is_unavailable(monkeypatch):
+    """qqq_ma50=0.0 signals a degraded fetch (see market_context._fetch_index_mas).
+    A naive `qqq_price < qqq_ma50` comparison is always False against 0.0,
+    which would let CELT fire completely unguarded on a bad-data day — this
+    must fail closed instead, even with an otherwise-qualifying chain."""
+    import celt_scanner as cs
+
+    closes = _crash_closes()
+    spot = closes[-1]
+    chain = _chain(
+        calls=[
+            _c(spot, 30, iv=1.20), _c(spot, 35, iv=1.15),
+            _c(spot * 0.6, 400, iv=0.45, delta=0.80,
+               bid=spot * 0.42, ask=spot * 0.43, oi=2000),
+        ],
+        stock_price=spot, iv30=0.68, iv_rank=55.0,
+    )
+    monkeypatch.setattr(cs, "_fetch_closes", lambda syms: {"NVDA": closes})
+    monkeypatch.setattr(cs, "fetch_option_chain", lambda sym, days_out=105, strike_count=20: chain)
+    monkeypatch.setattr(cs, "_fetch_earnings_date", lambda sym: None)
+
+    assert cs.scan_celt_setups(["NVDA"], qqq_price=400.0, qqq_ma50=0.0) == []
+
+
+def test_scan_skips_a_symbol_with_earnings_in_the_next_7_days(monkeypatch):
+    """Not a DTE-window exclusion (that's nonsensical at 270+ days — see the
+    comment at the call site) — a near-term-only check against a fresh
+    catalyst that could extend the crash right as you're entering."""
+    import celt_scanner as cs
+    from datetime import date, timedelta
+
+    closes = _crash_closes()
+    spot = closes[-1]
+    chain = _chain(
+        calls=[
+            _c(spot, 30, iv=1.20), _c(spot, 35, iv=1.15),
+            _c(spot * 0.6, 400, iv=0.45, delta=0.80,
+               bid=spot * 0.42, ask=spot * 0.43, oi=2000),
+        ],
+        stock_price=spot, iv30=0.68, iv_rank=55.0,
+    )
+    monkeypatch.setattr(cs, "_fetch_closes", lambda syms: {"NVDA": closes})
+    monkeypatch.setattr(cs, "fetch_option_chain", lambda sym, days_out=105, strike_count=20: chain)
+
+    monkeypatch.setattr(cs, "_fetch_earnings_date", lambda sym: date.today() + timedelta(days=3))
+    assert cs.scan_celt_setups(["NVDA"], qqq_price=400.0, qqq_ma50=450.0) == []
+
+    # Same chain, earnings well past the 7-day window — must qualify.
+    monkeypatch.setattr(cs, "_fetch_earnings_date", lambda sym: date.today() + timedelta(days=30))
+    assert len(cs.scan_celt_setups(["NVDA"], qqq_price=400.0, qqq_ma50=450.0)) == 1
 
 
 def test_scan_drops_the_symbol_when_every_leap_is_too_wide(monkeypatch):
@@ -323,6 +418,7 @@ def test_scan_drops_the_symbol_when_every_leap_is_too_wide(monkeypatch):
         stock_price=spot, iv30=0.68,
     )
     monkeypatch.setattr(cs, "_fetch_closes", lambda syms: {"NVDA": closes})
-    monkeypatch.setattr(cs, "fetch_option_chain", lambda sym, days_out=105: chain)
+    monkeypatch.setattr(cs, "fetch_option_chain", lambda sym, days_out=105, strike_count=20: chain)
+    monkeypatch.setattr(cs, "_fetch_earnings_date", lambda sym: None)
 
-    assert cs.scan_celt_setups(["NVDA"]) == []
+    assert cs.scan_celt_setups(["NVDA"], qqq_price=400.0, qqq_ma50=450.0) == []

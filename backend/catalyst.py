@@ -1,9 +1,13 @@
 """
-Catalyst context: earnings dates, IV trend analysis, volume spike detection.
+Catalyst context: earnings dates, dividend yield, IV trend analysis, volume
+spike detection.
 """
 import logging
+import time
 from datetime import date, timedelta
 from typing import Optional
+
+import yfinance as yf
 
 from models import CatalystContext, OptionChainData
 
@@ -11,6 +15,78 @@ logger = logging.getLogger(__name__)
 
 # In-process rolling IV30 history: (symbol, date) -> iv30
 _iv_trend_history: dict[tuple[str, date], float] = {}
+
+# Earnings dates get revised as the report approaches, so this cache is
+# short-lived (1 day) — unlike the dividend cache below, which can be long.
+_earnings_cache: dict[str, Optional[date]] = {}
+_earnings_cache_time: dict[str, float] = {}
+_EARNINGS_TTL_SECONDS = 86400
+
+_dividend_cache: dict[str, float] = {}
+_dividend_cache_time: dict[str, float] = {}
+_DIVIDEND_TTL_SECONDS = 7 * 86400
+
+
+def _fetch_earnings_date(symbol: str) -> Optional[date]:
+    """Next confirmed/estimated earnings date via yfinance, or None on any
+    failure or absence — never a guess. `Ticker.calendar` is JSON-backed
+    (Yahoo's calendarEvents module), not the HTML-scrape-based
+    get_earnings_dates(), which is brittle across Yahoo layout changes.
+    `calendar['Earnings Date']` is a list (Yahoo gives a start/end estimate
+    range); the key can be absent entirely.
+    """
+    now = time.monotonic()
+    cached_at = _earnings_cache_time.get(symbol)
+    if cached_at is not None and now - cached_at < _EARNINGS_TTL_SECONDS:
+        return _earnings_cache.get(symbol)
+
+    result: Optional[date] = None
+    try:
+        cal = yf.Ticker(symbol).calendar or {}
+        dates = cal.get("Earnings Date") or []
+        today = date.today()
+        upcoming = [d for d in dates if isinstance(d, date) and d >= today]
+        if upcoming:
+            result = min(upcoming)
+    except Exception as e:
+        logger.debug("Earnings date fetch failed for %s: %s", symbol, e)
+
+    _earnings_cache[symbol] = result
+    _earnings_cache_time[symbol] = now
+    return result
+
+
+def _fetch_dividend_yield(symbol: str, spot: float) -> float:
+    """Trailing-12-month continuous dividend yield, derived from actual cash
+    dividend payments (yf.Ticker.dividends) rather than Ticker.info's
+    dividendYield field — that field is a raw passthrough of Yahoo's JSON
+    with no guaranteed stable unit across yfinance versions, and a
+    wrong-by-100x yield would manufacture parity violations on every
+    dividend payer instead of correcting for them. 0.0 on any failure or for
+    a non-payer — matches "no dividend", never a guessed value. 7-day TTL:
+    unlike an earnings date, a yield doesn't need daily freshness.
+    """
+    now = time.monotonic()
+    cached_at = _dividend_cache_time.get(symbol)
+    if cached_at is not None and now - cached_at < _DIVIDEND_TTL_SECONDS:
+        return _dividend_cache.get(symbol, 0.0)
+
+    result = 0.0
+    if spot > 0:
+        try:
+            divs = yf.Ticker(symbol).dividends
+            if divs is not None and len(divs) > 0:
+                cutoff = date.today() - timedelta(days=365)
+                trailing_total = sum(
+                    float(amt) for ts, amt in divs.items() if ts.date() >= cutoff
+                )
+                result = max(0.0, min(0.15, trailing_total / spot))
+        except Exception as e:
+            logger.debug("Dividend yield fetch failed for %s: %s", symbol, e)
+
+    _dividend_cache[symbol] = result
+    _dividend_cache_time[symbol] = now
+    return result
 
 
 def _get_iv_trend(symbol: str, current_iv30: float) -> str:
@@ -38,36 +114,6 @@ def _get_iv_trend(symbol: str, current_iv30: float) -> str:
     if current_iv30 < five_day_ago_iv * 0.95:
         return "FALLING"
     return "STABLE"
-
-
-def _detect_earnings_from_term_structure(chain: OptionChainData) -> Optional[date]:
-    """
-    Proxy for earnings date: find near-term expiry with significantly elevated IV
-    vs the next expiry (backwardation suggests event).
-    """
-    from datetime import date as date_type
-    expiries = sorted(set(c.expiry for c in chain.calls if 7 <= c.dte <= 60))
-    if len(expiries) < 2:
-        return None
-
-    exp_1 = expiries[0]
-    exp_2 = expiries[1]
-
-    def atm_iv(expiry: date_type) -> float:
-        S = chain.stock_price
-        candidates = [c for c in chain.calls if c.expiry == expiry and c.iv > 0 and c.bid > 0]
-        if not candidates:
-            return 0.0
-        closest = min(candidates, key=lambda c: abs(c.strike - S))
-        return closest.iv
-
-    iv1 = atm_iv(exp_1)
-    iv2 = atm_iv(exp_2)
-
-    if iv1 > 0 and iv2 > 0 and (iv1 - iv2) > 0.10:
-        # Significant near-term IV spike — earnings likely between exp_1 and today
-        return exp_1
-    return None
 
 
 def _volume_spike(chain: OptionChainData) -> bool:
@@ -142,18 +188,23 @@ def get_catalyst_context(
     symbol: str,
     chain: OptionChainData,
     trade_dte: int,
-    schwab_earnings_date: Optional[date] = None,
+    real_earnings_date: Optional[date] = None,
 ) -> CatalystContext:
     """
     Derive catalyst context for a given symbol and trade horizon.
-    schwab_earnings_date: pass if fetched from Schwab fundamental endpoint.
+    real_earnings_date: pass the result of _fetch_earnings_date(symbol) —
+    the caller fetches it (see that function's docstring for why) rather
+    than this function fetching it itself, so a direct unit-test call stays
+    network-free. A missing date resolves to "we don't know" (0 catalyst
+    points downstream), never a guess — this used to fall back to a
+    term-structure proxy that read "next expiry with elevated near-term IV"
+    as an earnings date and could grant real scoring weight to a plain
+    date-gap artifact. Removed rather than kept as a fallback.
     """
     today = date.today()
 
-    # 1. Earnings date
-    earnings_date = schwab_earnings_date
-    if earnings_date is None:
-        earnings_date = _detect_earnings_from_term_structure(chain)
+    # 1. Earnings date — real source only, see docstring above.
+    earnings_date = real_earnings_date
 
     earnings_dte: Optional[int] = None
     earnings_in_window = False

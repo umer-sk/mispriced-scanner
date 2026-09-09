@@ -61,7 +61,12 @@ def test_skew_inversion_fires_when_put_skew_flat():
     call = OptionContract("", expiry, 35, 0.8, 1.2, 1.0, 1.0, 200, 500, 0.21, 0.10,
                           0.01, -0.05, 0.10, 1.0, False)
     put.strike = 135; call.strike = 165
-    chain = _make_chain(stock_price=150, puts=[put], calls=[call])
+    # An ATM put so the direction-specific tie-break (put_10d cheap vs ATM,
+    # not just vs the call side) has something real to compare against.
+    atm_put = OptionContract("", expiry, 35, 2.9, 3.1, 3.0, 3.0, 200, 500, 0.30, -0.50,
+                             0.01, -0.05, 0.10, 3.0, False)
+    atm_put.strike = 150
+    chain = _make_chain(stock_price=150, puts=[put, atm_put], calls=[call])
     signal = detect_skew_inversion(chain)
     assert signal is not None
     assert signal.detector == "skew_inversion"
@@ -83,9 +88,9 @@ def test_skew_inversion_no_fire_when_normal_skew():
 # ─── put_parity ───────────────────────────────────────────────────────────────
 
 def test_put_parity_fires_when_put_underpriced():
-    from scanner import detect_put_parity_violation
+    from scanner import RISK_FREE_RATE, detect_put_parity_violation
     expiry = date.today() + timedelta(days=35)
-    S, K, r, T = 150.0, 150.0, 0.0525, 35 / 365
+    S, K, r, T = 150.0, 150.0, RISK_FREE_RATE, 35 / 365
     call_mid = 4.0
     theoretical_put = call_mid - S + K * math.exp(-r * T)  # ≈ 3.72
     # Actual put trades below theoretical
