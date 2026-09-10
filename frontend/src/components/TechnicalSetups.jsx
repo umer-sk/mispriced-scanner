@@ -190,11 +190,7 @@ export default function TechnicalSetups() {
   const idleTimerRef = useRef(null)
   const [error, setError] = useState(null)
   const [scanTimestamp, setScanTimestamp] = useState(null)
-  // 1.5, not 2.0: every non-bounce structure already enforces its own
-  // >= 2.0 gate server-side, so this default changes nothing for them —
-  // it only stops silently hiding a 200W bounce setup that already cleared
-  // its own, separately-calibrated 1.5 bar.
-  const [filters, setFilters] = useState({ direction: 'both', minRR: 1.5, sort: 'rr' })
+  const [filters, setFilters] = useState({ direction: 'both', sort: 'rr' })
   const [saveTarget, setSaveTarget] = useState(null)
   const [contractCount, setContractCount] = useState(1)
   const [notes, setNotes] = useState('')
@@ -351,16 +347,6 @@ export default function TechnicalSetups() {
           ))}
         </div>
         <div style={styles.filterGroup}>
-          <span style={styles.filterLabel} title="Minimum risk-to-reward ratio. For spreads: max gain ÷ max loss. For long calls/puts (including 200W bounces): (expected payoff − premium) ÷ premium — an expected GAIN ratio, not expected value ÷ premium. rr=2.0 means the expected payoff is 3× the premium paid, accounting for the full range of outcomes, not just one price target.">MIN R:R</span>
-          <input
-            type="range" min="1.0" max="5.0" step="0.5"
-            value={filters.minRR}
-            onChange={e => setFilters(f => ({ ...f, minRR: parseFloat(e.target.value) }))}
-            style={styles.slider}
-          />
-          <span style={styles.filterVal}>{filters.minRR.toFixed(1)}:1</span>
-        </div>
-        <div style={styles.filterGroup}>
           <span style={styles.filterLabel} title="Sort order for the results list">SORT</span>
           <button
             title="Sort by risk-to-reward ratio — highest reward per dollar risked first"
@@ -379,7 +365,7 @@ export default function TechnicalSetups() {
       {!loading && setups.length === 0 && scanPhase === 'idle' && (
         <div style={styles.empty}>
           {scanTimestamp
-            ? 'No setups meet your filters. Try lowering Min R:R or running a fresh scan.'
+            ? 'No setups clear the bar right now. Try running a fresh scan.'
             : 'No scan data yet. Click ▶ SCAN SETUPS to run the first scan.'}
         </div>
       )}
@@ -444,8 +430,6 @@ const styles = {
     color: '#666', cursor: 'pointer', fontFamily: 'monospace', fontSize: '11px', borderRadius: '3px',
   },
   filterBtnActive: { borderColor: '#00ffaa', color: '#00ffaa', background: '#0a1a0f' },
-  slider: { width: '80px', accentColor: '#00ffaa' },
-  filterVal: { fontFamily: 'monospace', fontSize: '11px', color: '#aaa', minWidth: '32px' },
   empty: {
     padding: '48px 16px', textAlign: 'center',
     color: '#555', fontFamily: 'monospace', fontSize: '13px',

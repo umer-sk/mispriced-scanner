@@ -27,9 +27,8 @@ function isMarketOpen() {
   return minutes >= 9 * 60 + 30 && minutes <= 16 * 60
 }
 
-function sortOpportunities(opps, sort, minOI) {
-  let list = [...opps]
-  if (minOI) list = list.filter(o => o.long_leg_oi >= 500 && o.short_leg_oi >= 500)
+function sortOpportunities(opps, sort) {
+  const list = [...opps]
   switch (sort) {
     case 'rr': return list.sort((a, b) => b.rr_ratio - a.rr_ratio)
     case 'debit': return list.sort((a, b) => a.net_debit - b.net_debit)
@@ -133,7 +132,7 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
   const isStale = ageSeconds > DATA_STALE_THRESHOLD
 
   const opps = data?.opportunities ?? []
-  const sorted = sortOpportunities(opps, filters.sort, filters.minOI)
+  const sorted = sortOpportunities(opps, filters.sort)
 
   const scanTime = data?.scan_timestamp
     ? new Date(data.scan_timestamp).toLocaleTimeString('en-US', {
@@ -267,7 +266,7 @@ export default function Dashboard({ data, loading, error, filters, onFiltersChan
         <div style={{ paddingBottom: '32px' }}>
           {sorted.length === 0 && (
             <div style={styles.empty}>
-              No opportunities match your filters. Try lowering the minimum score or R:R.
+              No opportunities clear the bar right now. Check back after the next scan.
             </div>
           )}
           {sorted.map((setup, i) => (

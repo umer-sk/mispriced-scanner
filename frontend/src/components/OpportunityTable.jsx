@@ -127,7 +127,7 @@ export default function OpportunityTable({ opportunities, onSaveToJournal }) {
   if (opportunities.length === 0) {
     return (
       <div style={styles.empty}>
-        No opportunities match your filters. Try lowering the minimum score or R:R.
+        No opportunities clear the bar right now. Check back after the next scan.
       </div>
     )
   }

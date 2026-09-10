@@ -108,11 +108,8 @@ export default function App() {
   const [sectors, setSectors] = useState([])
   const [activeSector, setActiveSector] = useState(null)
   const [filters, setFilters] = useState({
-    minRR: 2.0,
-    minScore: 55,
     detector: 'all',
     direction: 'both',
-    minOI: false,
     sort: 'score',
   })
 

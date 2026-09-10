@@ -2,13 +2,12 @@
 const BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
 
 export async function fetchOpportunities(filters = {}) {
+  // Only surfaces Tier A (backend main._is_tier_a) — no min_rr/min_score
+  // slider; detector and direction are real preferences, not a quality bar.
   const params = new URLSearchParams({
-    min_rr:    filters.minRR      ?? 2.0,
-    min_score: filters.minScore   ?? 55,
     detector:  filters.detector   ?? 'all',
     direction: filters.direction  ?? 'both',
   })
-  if (filters.minOI) params.set('min_oi', '100')
   const res = await fetch(`${BASE_URL}/opportunities?${params}`)
   if (!res.ok) throw new Error(`API error: ${res.status}`)
   return res.json()
@@ -33,14 +32,11 @@ export async function fetchHealth() {
 }
 
 export async function fetchTechnicalSetups(filters = {}) {
+  // Only surfaces Tier A (backend main._is_tier_a) — no min_rr slider; the
+  // 200W bounce gets its own lower R:R floor there via forward_test's
+  // per-source override, not a query param here.
   const params = new URLSearchParams({
     direction: filters.direction ?? 'both',
-    // 1.5, not 2.0 — matches the backend's BOUNCE_RR_MIN default
-    // (technical_scanner.py); all 3 call sites pass full `filters` today so
-    // this fallback is currently dead, but it should still agree with the
-    // backend rather than silently filter out qualifying bounce setups if
-    // that ever changes.
-    min_rr:    filters.minRR     ?? 1.5,
     sort:      filters.sort      ?? 'rr',
   })
   const res = await fetch(`${BASE_URL}/technical-setups?${params}`)
@@ -55,8 +51,8 @@ export async function triggerSetupsScan() {
 }
 
 export async function fetchCeltSetups(filters = {}) {
+  // Only surfaces Tier A (backend main._is_tier_a) — no min-score slider.
   const params = new URLSearchParams({
-    min_score: filters.minScore ?? 2.2,
     sort: filters.sort ?? 'score',
   })
   const res = await fetch(`${BASE_URL}/celt-setups?${params}`)

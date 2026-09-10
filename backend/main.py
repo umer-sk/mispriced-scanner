@@ -34,7 +34,7 @@ from technical_scanner import BOUNCE_RR_MIN, scan_technical_setups
 from schwab_client import fetch_all_chains, fetch_option_chain, fetch_quotes
 from celt_scanner import scan_celt_setups
 from supabase_client import load_scan_results, save_scan_results
-from forward_test import mark_open_positions, snapshot_setups
+from forward_test import CELT_RR_MIN, QUALITY_MIN, classify, mark_open_positions, normalise, snapshot_setups
 
 logging.basicConfig(
     level=logging.INFO,
@@ -468,6 +468,35 @@ def _attr(obj, *keys, default=None):
     return obj
 
 
+def _is_tier_a(setup, source: str) -> bool:
+    """Tier A per forward_test.classify — the same bar the forward-test
+    tracker itself calls trustworthy (quality, R:R, and breakeven all
+    calibrated per structure/source), so "what surfaces on the tab" and
+    "what the tracker calls good" share one definition instead of two that
+    can silently drift apart.
+
+    classify()/normalise() do real dataclass attribute access (including
+    nested reads like setup.catalyst.earnings_in_window), so this can't run
+    against a Supabase-restored plain dict (main.py loads those on a cold
+    start, before the next scan tick repopulates the cache with real
+    dataclass instances — see startup()). Fall back to a looser
+    _attr()-tolerant approximation of the same bar in that case, rather than
+    letting every setup vanish from the tab until the next scan.
+    """
+    try:
+        tier, _ = classify(normalise(setup, source))
+        return tier == "A"
+    except Exception:
+        is_bounce = _attr(setup, 'setup_type', default='consensus') == '200w_bounce'
+        rr_min = CELT_RR_MIN if source == "celt" else (BOUNCE_RR_MIN if is_bounce else 2.0)
+        quality = _attr(setup, 'score', default=None)
+        if quality is None:
+            quality = _attr(setup, 'signal_count', default=None)
+        if quality is None:
+            quality = _attr(setup, 'confidence', default=0)
+        return _attr(setup, 'rr_ratio', default=0) >= rr_min and quality >= QUALITY_MIN[source]
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -529,16 +558,18 @@ async def trigger_sector_scan(request: Request, background_tasks: BackgroundTask
 async def get_technical_setups(
     request: Request,
     direction: str = "both",
-    # BOUNCE_RR_MIN, not 2.0 — see the comment at _run_technical_scan's call site.
-    min_rr: float = BOUNCE_RR_MIN,
     sort: str = "rr",
 ):
     setups = _cache["technical_setups"]
     ts = _cache["technical_timestamp"]
 
+    # Tier A only (see _is_tier_a) — no manual R:R/quality slider. A setup
+    # already has to clear its own construction gates (signal count, R:R,
+    # earnings, liquidity) to exist at all; this is the tracker's own bar
+    # for "worth trusting", not an extra arbitrary cutoff.
     filtered = [
         s for s in setups
-        if _attr(s, 'rr_ratio', default=0) >= min_rr
+        if _is_tier_a(s, "technical")
         and (direction == "both" or _attr(s, 'direction', default='') == direction)
     ]
 
@@ -565,24 +596,22 @@ async def trigger_technical_scan(request: Request, background_tasks: BackgroundT
 @limiter.limit("10/minute")
 async def get_opportunities(
     request: Request,
-    min_rr: float = 2.0,
     max_debit: float = 8.0,
-    min_score: int = 55,
     detector: str = "all",
     direction: str = "both",
 ):
     opps = _cache["opportunities"]
 
-    # Apply filters. contributing_detectors (falling back to the single
-    # signal.detector for a setup that predates that field, e.g. a stale
-    # Supabase-cached row) — filtering on the exact signal.detector alone
-    # would make a merged setup unreachable by any detector except whichever
-    # one happened to end up as its representative.
+    # Tier A only (see _is_tier_a) — no manual R:R/score slider. contributing_
+    # detectors (falling back to the single signal.detector for a setup that
+    # predates that field, e.g. a stale Supabase-cached row) — filtering on
+    # the exact signal.detector alone would make a merged setup unreachable
+    # by any detector except whichever one happened to end up as its
+    # representative.
     filtered = [
         s for s in opps
-        if _attr(s, 'rr_ratio', default=0) >= min_rr
+        if _is_tier_a(s, "scanner")
         and _attr(s, 'net_debit', default=999) <= max_debit
-        and _attr(s, 'score', default=0) >= min_score
         and (detector == "all" or detector in (
             _attr(s, 'contributing_detectors', default=None)
             or [_attr(s, 'signal', 'detector', default='')]
@@ -629,14 +658,14 @@ async def get_opportunity(request: Request, symbol: str):
 @limiter.limit("10/minute")
 async def get_celt_setups(
     request: Request,
-    min_score: float = 2.2,
     sort: str = "score",
 ):
     setups = _cache["celt_setups"]
     ts = _cache["celt_timestamp"]
     attempt = _cache["celt_last_attempt"]
 
-    filtered = [s for s in setups if _attr(s, 'signal_score', default=0) >= min_score]
+    # Tier A only (see _is_tier_a) — no manual min-score slider.
+    filtered = [s for s in setups if _is_tier_a(s, "celt")]
     if sort == "drawdown":
         filtered.sort(key=lambda s: _attr(s, 'drawdown_pct', default=0), reverse=True)
     elif sort == "ivrank":

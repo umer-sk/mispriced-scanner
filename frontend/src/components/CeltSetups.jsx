@@ -172,7 +172,7 @@ export default function CeltSetups() {
   // indefinitely even after many successful scans — this is what lets the
   // empty state below say "found nothing" instead of "never scanned".
   const [lastAttempt, setLastAttempt] = useState(null)
-  const [filters, setFilters] = useState({ minScore: 2.2, sort: 'score' })
+  const [filters, setFilters] = useState({ sort: 'score' })
   const [saveTarget, setSaveTarget] = useState(null)
   const [contractCount, setContractCount] = useState(1)
   const [notes, setNotes] = useState('')
@@ -327,16 +327,6 @@ export default function CeltSetups() {
 
       <div style={styles.filterBar}>
         <div style={styles.filterGroup}>
-          <span style={styles.filterLabel} title="Minimum total signal score (max 3.2): sum of Price Damage (max 1.0) + HV Elevation (max 1.0) + Sentiment (max 1.2). 2.2 = minimum to show, 2.8+ = high conviction crash entry.">MIN SCORE</span>
-          <input
-            type="range" min="2.0" max="3.2" step="0.1"
-            value={filters.minScore}
-            onChange={e => setFilters(f => ({ ...f, minScore: parseFloat(e.target.value) }))}
-            style={styles.slider}
-          />
-          <span style={styles.filterVal}>{filters.minScore.toFixed(1)}</span>
-        </div>
-        <div style={styles.filterGroup}>
           <span style={styles.filterLabel} title="Sort order">SORT</span>
           {[['score', 'Score'], ['drawdown', 'Drawdown'], ['ivrank', 'IV Rank']].map(([val, label]) => (
             <button
@@ -360,7 +350,7 @@ export default function CeltSetups() {
       {!loading && setups.length === 0 && scanPhase === 'idle' && (
         <div style={styles.empty}>
           {scanTimestamp
-            ? 'No CELT setups meet your filters. Try lowering the min score or running a fresh scan.'
+            ? 'No CELT setups clear the bar right now. Try running a fresh scan.'
             : lastAttempt
             ? `No qualifying crash setups as of the last scan (${scanTime} ET) — the market may not be in a crash right now. Try running a fresh scan.`
             : 'No scan data yet. Click ▶ RUN SCAN to run the first CELT scan (~60s).'}
@@ -423,8 +413,6 @@ const styles = {
     color: '#666', cursor: 'pointer', fontFamily: 'monospace', fontSize: '11px', borderRadius: '3px',
   },
   filterBtnActive: { borderColor: '#00ffaa', color: '#00ffaa', background: '#0a1a0f' },
-  slider: { width: '80px', accentColor: '#00ffaa' },
-  filterVal: { fontFamily: 'monospace', fontSize: '11px', color: '#aaa', minWidth: '28px' },
   legend: {
     display: 'flex', gap: '16px', padding: '6px 16px',
     fontFamily: 'monospace', fontSize: '10px', color: '#444',

@@ -49,7 +49,7 @@ npm run preview   # Preview production build
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Status, last scan time, token age days |
-| `GET /opportunities` | Query params: `min_rr`, `max_debit`, `min_score`, `detector` |
+| `GET /opportunities` | Query params: `max_debit`, `detector`, `direction`. No min-RR/min-score params — read-time filtering is Tier A only (`main._is_tier_a`, same bar as `forward_test.classify`), not a client-adjustable threshold. |
 | `GET /opportunity/{symbol}` | Best TradeSetup for one symbol |
 
 ### Data Flow
@@ -59,7 +59,13 @@ npm run preview   # Preview production build
 3. `get_catalyst_context()` → earnings detection, IV trend, narrative
 4. `run_all_detectors()` → 9 detectors produce `MispricingSignal`
 5. `_construct_spread()` → bull call spread, calendar, or long call chosen by context
-6. Results cached in `_cache` dict; scored ≥ 55 and RR ≥ 2.0 surfaced to frontend
+6. Results cached in `_cache` dict at score ≥ 45/RR ≥ 2.0/liquidity_ok (kept broad so
+   near-misses are still available for forward-test calibration); `/opportunities`,
+   `/technical-setups`, and `/celt-setups` then narrow this further at read time to
+   Tier A only (`main._is_tier_a` — score/signal_count/confidence ≥ 60, RR ≥ its
+   own per-structure floor, breakeven move within its own per-structure band — the
+   same definition `forward_test.classify` uses). There is no user-adjustable
+   min-RR/min-score slider on any tab; direction/detector/sort are the only filters
 
 ### The 9 Detectors
 

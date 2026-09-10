@@ -629,12 +629,40 @@ def test_run_technical_scan_calls_scan_with_bounce_rr_min_not_2_0(monkeypatch):
     assert captured["min_rr"] == BOUNCE_RR_MIN
 
 
-def test_technical_setups_endpoint_default_min_rr_is_bounce_rr_min_not_2_0():
-    """The /technical-setups read-time filter. Even if the scan stores a
-    rr=1.8 bounce setup, a caller relying on the endpoint's default would
-    still have it filtered back out at read time if this default were 2.0."""
-    import inspect
+def test_technical_setups_endpoint_surfaces_bounce_at_its_own_lower_rr_floor():
+    """The /technical-setups read-time filter is now Tier A (main._is_tier_a
+    -> forward_test.classify/normalise), not a min_rr query param a caller
+    could silently rely on the wrong default for. normalise() gives the 200W
+    bounce its own lower RR floor (BOUNCE_RR_MIN=1.5) via a per-source
+    override — so a bounce at rr=1.8 must still surface, while a consensus
+    setup at the same rr=1.8 must not, since the shared floor is 2.0."""
+    from datetime import datetime, timedelta, timezone
 
     main = _import_main()
-    sig = inspect.signature(main.get_technical_setups)
-    assert sig.parameters["min_rr"].default == BOUNCE_RR_MIN
+
+    def _setup(symbol, setup_type, dte, rr):
+        return TechnicalSetup(
+            symbol=symbol, stock_price=100.0, direction="bullish",
+            signal_count=7 if setup_type == "consensus" else 4,
+            signal_details={}, structure="long_call", strike=105.0, short_strike=None,
+            expiry=date.today() + timedelta(days=dte), dte=dte, delta=0.45, iv_rank=32.0,
+            premium=5.0, price_target=110.0, rr_ratio=rr, max_loss=500.0,
+            breakeven_move_pct=5.0, probability_of_profit=40,
+            order_string="BUY +1 X CALL",
+            liquidity_ok=True, long_leg_spread_pct=4.0, short_leg_spread_pct=4.0,
+            earnings_within_dte=False, setup_type=setup_type,
+        )
+
+    # dte=45 sits in the shared 30-60 band; dte=75 needs the bounce's own
+    # 60-100 override (BOUNCE_DTE_MIN/MAX) to pass at all.
+    consensus = _setup("AAA", "consensus", dte=45, rr=1.8)
+    bounce = _setup("BBB", "200w_bounce", dte=75, rr=1.8)
+
+    main._cache["technical_setups"] = [consensus, bounce]
+    main._cache["technical_timestamp"] = datetime.now(timezone.utc)
+
+    from fastapi.testclient import TestClient
+    client = TestClient(main.app)
+    resp = client.get("/technical-setups")
+    symbols = [s["symbol"] for s in resp.json()["setups"]]
+    assert symbols == ["BBB"]
