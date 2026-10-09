@@ -274,7 +274,10 @@ def fetch_option_chain(symbol: str, days_out: int = 105, strike_count: int = 20)
             strike_count=strike_count,
             include_underlying_quote=True,
             strategy=schwab.client.Client.Options.Strategy.SINGLE,
-            from_date=today,
+            # No from_date: Schwab defaults to its own "today". Passing our
+            # date.today() is rejected with a 400 ("Check Param Values") once
+            # Schwab's trading day has rolled past it (observed after-hours),
+            # which made every chain fetch fail and every scan report 0/N.
             to_date=to_date,
         )
         resp.raise_for_status()

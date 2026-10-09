@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional
@@ -24,6 +25,7 @@ from slowapi.util import get_remote_address
 load_dotenv()
 
 from catalyst import _fetch_dividend_yield, _fetch_earnings_date, get_catalyst_context
+from memory_util import release_memory
 from market_context import _token_age_days, get_market_context
 from models import MarketContext, SectorData, TradeSetup
 from qqq_holdings import QQQ_TOP50
@@ -93,6 +95,17 @@ _cache: dict = {
 # concurrently — each ~186 Schwab requests against a 120/min budget, each
 # holding a full set of option chains on a 512MB instance.
 _scan_lock = asyncio.Lock()
+_sector_lock = asyncio.Lock()
+
+
+@asynccontextmanager
+async def _exclusive_scan():
+    """Hold _scan_lock; on exit hand freed memory back to the OS."""
+    async with _scan_lock:
+        try:
+            yield
+        finally:
+            await asyncio.get_running_loop().run_in_executor(None, release_memory)
 
 # A scan that fetched almost nothing is a failure, not an empty market. Below
 # this fraction of chains we refuse to overwrite the cache or Supabase, because
@@ -138,7 +151,7 @@ async def _run_scan() -> None:
         logger.info("Full scan already in progress — ignoring duplicate trigger")
         return
 
-    async with _scan_lock:
+    async with _exclusive_scan():
         await _run_scan_inner()
 
 
@@ -268,7 +281,7 @@ async def _run_celt_scan() -> None:
         logger.info("Another scan in progress — ignoring CELT trigger")
         return
 
-    async with _scan_lock:
+    async with _exclusive_scan():
         t_start = time.monotonic()
         logger.info("Starting CELT scan of %d symbols", len(QQQ_TOP50))
         try:
@@ -318,7 +331,7 @@ async def _run_technical_scan() -> None:
         logger.info("Another scan in progress — ignoring technical trigger")
         return
 
-    async with _scan_lock:
+    async with _exclusive_scan():
         t_start = time.monotonic()
         logger.info("Starting technical scan of %d symbols", len(QQQ_TOP50))
         try:
@@ -354,16 +367,28 @@ async def _run_technical_scan() -> None:
 
 async def refresh_sector_analysis() -> None:
     """Refresh sector ETF data once daily. Does not require Schwab auth."""
-    try:
-        logger.info("Refreshing sector analysis")
-        sectors = await asyncio.get_running_loop().run_in_executor(
-            None, get_sector_analysis
-        )
-        _cache["sector_analysis"] = sectors
-        _cache["sector_timestamp"] = datetime.now(timezone.utc)
-        logger.info("Sector analysis updated: %d sectors", len(sectors))
-    except Exception as e:
-        logger.exception("Sector analysis refresh failed: %s", e)
+    # Not serialized with the scans by _scan_lock (a scan must never be dropped
+    # because a sector refresh happened to be running), so guard memory here
+    # instead: skip rather than stack 11 chains + a yfinance download on top of
+    # a running scan, and never run two refreshes at once.
+    if _sector_lock.locked():
+        logger.info("Sector refresh already running — skipping duplicate")
+        return
+    if _scan_lock.locked():
+        logger.info("Scan in progress — skipping sector refresh to protect memory")
+        return
+    async with _sector_lock:
+        try:
+            logger.info("Refreshing sector analysis")
+            loop = asyncio.get_running_loop()
+            sectors = await loop.run_in_executor(None, get_sector_analysis)
+            _cache["sector_analysis"] = sectors
+            _cache["sector_timestamp"] = datetime.now(timezone.utc)
+            logger.info("Sector analysis updated: %d sectors", len(sectors))
+        except Exception as e:
+            logger.exception("Sector analysis refresh failed: %s", e)
+        finally:
+            await asyncio.get_running_loop().run_in_executor(None, release_memory)
 
 
 # ---------------------------------------------------------------------------
