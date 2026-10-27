@@ -29,14 +29,14 @@ from memory_util import release_memory
 from market_context import _token_age_days, get_market_context
 from models import MarketContext, SectorData, TradeSetup
 from qqq_holdings import QQQ_TOP50
-from scanner import run_all_detectors
+from scanner import meets_surfacing_gates, run_all_detectors
 from sector_analysis import get_sector_analysis
 from technical_analysis import get_technical_contexts
 from technical_scanner import BOUNCE_RR_MIN, scan_technical_setups
 from schwab_client import fetch_all_chains, fetch_option_chain, fetch_quotes
 from celt_scanner import scan_celt_setups
 from supabase_client import load_scan_results, save_scan_results
-from forward_test import CELT_RR_MIN, QUALITY_MIN, classify, mark_open_positions, normalise, snapshot_setups
+from forward_test import CELT_RR_MIN, QUALITY_MIN, classify, mark_open_positions, normalise, select_for_recording, snapshot_setups
 
 logging.basicConfig(
     level=logging.INFO,
@@ -194,9 +194,11 @@ async def _run_scan_inner() -> None:
             all_setups.extend(setups)
 
         # 6. Filter
+        # all_setups now includes calibration-band near-misses (see
+        # scanner.CALIB_*); the cache keeps only what met the surfacing gates.
         filtered = [
             s for s in all_setups
-            if s.score >= 45 and s.rr_ratio >= 2.0 and s.liquidity_ok
+            if s.score >= 45 and meets_surfacing_gates(s) and s.liquidity_ok
         ]
         filtered.sort(key=lambda s: s.score, reverse=True)
 
@@ -260,7 +262,11 @@ async def _run_scan_inner() -> None:
         # so /health and /opportunities don't stall and the scan lock doesn't
         # hold the loop hostage for other triggers.
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, snapshot_setups, filtered, "scanner")
+        to_record = filtered + [
+            s for s in select_for_recording(all_setups, "scanner")
+            if not any(s is f for f in filtered)
+        ]
+        await loop.run_in_executor(None, snapshot_setups, to_record, "scanner")
         await loop.run_in_executor(None, mark_open_positions)
 
         elapsed = time.monotonic() - t_start
@@ -347,9 +353,17 @@ async def _run_technical_scan() -> None:
             setups = await loop.run_in_executor(
                 None, scan_technical_setups, QQQ_TOP50, BOUNCE_RR_MIN, "both"
             )
-            if not setups:
+            # near_miss setups are forward-test calibration only: never cached
+            # or shown, and not a reason to replace the last real results.
+            surfaced = [s for s in setups if not s.near_miss]
+            to_record = surfaced + [
+                s for s in select_for_recording(setups, "technical") if s.near_miss
+            ]
+            if not surfaced:
                 _record_scan_note("technical", "0 setups — cached results kept")
+                await loop.run_in_executor(None, snapshot_setups, to_record, "technical")
                 return
+            setups = surfaced
             _cache["technical_setups"] = setups
             _cache["last_scan_note"] = None
             tech_ts = datetime.now(timezone.utc)
@@ -357,7 +371,7 @@ async def _run_technical_scan() -> None:
             _cache["technical_symbols_scanned"] = len(QQQ_TOP50)
             _cache["last_scan_error"] = None
             save_scan_results("technical_setups", [_serialize(s) for s in setups], tech_ts)
-            await loop.run_in_executor(None, snapshot_setups, setups, "technical")
+            await loop.run_in_executor(None, snapshot_setups, to_record, "technical")
             elapsed = time.monotonic() - t_start
             logger.info("Technical scan complete: %d setups, %.1fs", len(setups), elapsed)
         except Exception as e:

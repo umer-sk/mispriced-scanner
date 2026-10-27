@@ -427,6 +427,52 @@ def realized_pnl(position: dict, final_pnl: float | None) -> float | None:
     return None
 
 
+# Near-miss recording. The scanners' constructors build setups one notch past
+# their surfacing gates so those gates can be calibrated, but recording every
+# one would add dozens of positions a day to mark. Cap the extras per scan,
+# best quality first. Only gates that are *tuning knobs* qualify: a setup that
+# also fails liquidity, earnings or trend, or sits far below the quality bar,
+# is not evidence about them.
+CALIBRATION_GATES = {"rr", "dte", "breakeven"}
+CALIBRATION_MAX_PER_SCAN = 5
+
+
+def _only_calibration_gates(n: dict, failed: list[str]) -> bool:
+    """True when every failed gate is a tuning knob. A quality miss counts only
+    inside the same near band classify() uses for Tier B — a setup far below
+    the quality bar says nothing about the R:R or DTE gates."""
+    gates = set(failed)
+    if "quality" in gates:
+        quality_min = n.get("quality_min", QUALITY_MIN[n["source"]])
+        quality_near = n.get("quality_near", QUALITY_NEAR[n["source"]])
+        if n["quality"] < quality_min - quality_near:
+            return False
+        gates.discard("quality")
+    return gates <= CALIBRATION_GATES
+
+
+def select_for_recording(
+    setups: list, source: str, max_calibration: int = CALIBRATION_MAX_PER_SCAN,
+) -> list:
+    """Every Tier A/B setup, plus up to `max_calibration` Tier C near-misses
+    that failed only the calibration gates."""
+    keep: list = []
+    near: list[tuple[float, object]] = []
+    for s in setups:
+        try:
+            n = normalise(s, source)
+            tier, failed = classify(n)
+        except Exception as e:
+            logger.error("forward test: could not classify a %s setup: %s", source, e)
+            continue
+        if tier in ("A", "B"):
+            keep.append(s)
+        elif failed and _only_calibration_gates(n, failed):
+            near.append((n["quality"], s))
+    near.sort(key=lambda t: t[0], reverse=True)
+    return keep + [s for _, s in near[:max_calibration]]
+
+
 def snapshot_setups(setups: list, source: str) -> int:
     """Record newly-seen setups. Returns the count of new positions.
 

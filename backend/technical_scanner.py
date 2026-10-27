@@ -91,6 +91,20 @@ BOUNCE_RR_MIN = 1.5
 # spot at 45 DTE) to clear, not the near-guaranteed pass the old formula gave.
 SPREAD_RR_MIN = 1.5
 
+# Near-miss pass. When the strict pass finds no structure for a symbol, the
+# constructors are run again with their R:R floors lowered by this margin and
+# the debit cap raised, and the result is flagged `near_miss`. Near-misses are
+# never shown or cached (main._run_technical_scan) — they exist so the
+# forward test can record setups just past a gate and say whether the gate is
+# set right. Liquidity exclusions are unchanged.
+# 1.0, not a token notch: live single-leg R:R from the EV model sits around a
+# median of ~0.95 (max ~1.7 across 62 directional symbols), so a +/-0.5 band
+# below the 2.0 gate captured essentially nothing and the gate could never be
+# checked. Per-scan volume is bounded by forward_test.CALIBRATION_MAX_PER_SCAN.
+NEAR_MISS_RR_MARGIN = 1.0
+NEAR_MISS_DEBIT_WIDTH_MAX = 0.50
+STRICT_DEBIT_WIDTH_MAX = 0.40
+
 
 def _score_200w_bounce(weekly_closes: list[float], weekly_lows: list[float]) -> Optional[dict]:
     """Detect a bounce off a rising 200-week moving average.
@@ -338,6 +352,7 @@ def _construct_long_call(
     signal_count: int,
     signal_details: dict,
     atr14: float,
+    near_miss: bool = False,
 ) -> Optional[TechnicalSetup]:
     """Long call at ~0.45 delta, 30–60 DTE. R:R via _single_leg_reward's
     expected-payoff model, using the ATR target as the drift assumption."""
@@ -350,7 +365,7 @@ def _construct_long_call(
     rr_ratio = round(_single_leg_reward(
         stock_price, call.strike, dte, call.iv, price_target, call.ask, is_put=False,
     ), 2)
-    if rr_ratio < 2.0:
+    if rr_ratio < 2.0 - (NEAR_MISS_RR_MARGIN if near_miss else 0.0):
         return None
 
     breakeven = call.strike + call.ask
@@ -404,6 +419,7 @@ def _construct_long_put(
     signal_count: int,
     signal_details: dict,
     atr14: float,
+    near_miss: bool = False,
 ) -> Optional[TechnicalSetup]:
     """Long put at ~0.45 delta (abs), 30–60 DTE. R:R via _single_leg_reward's
     expected-payoff model, using the ATR target as the drift assumption."""
@@ -416,7 +432,7 @@ def _construct_long_put(
     rr_ratio = round(_single_leg_reward(
         stock_price, put.strike, dte, put.iv, price_target, put.ask, is_put=True,
     ), 2)
-    if rr_ratio < 2.0:
+    if rr_ratio < 2.0 - (NEAR_MISS_RR_MARGIN if near_miss else 0.0):
         return None
 
     breakeven = put.strike - put.ask
@@ -470,6 +486,7 @@ def _construct_bull_call_spread_technical(
     signal_count: int,
     signal_details: dict,
     atr14: float,
+    near_miss: bool = False,
 ) -> Optional[TechnicalSetup]:
     """Bull call spread: long 0.45Δ, short 0.25Δ, same expiry. R:R via the
     same expected-value model the single-leg constructors use (see
@@ -494,7 +511,8 @@ def _construct_bull_call_spread_technical(
         return None
 
     net_debit = round(long_leg.ask - short_leg.bid, 2)
-    if net_debit <= 0 or net_debit > spread_width * 0.40:
+    if net_debit <= 0 or net_debit > spread_width * (
+            NEAR_MISS_DEBIT_WIDTH_MAX if near_miss else STRICT_DEBIT_WIDTH_MAX):
         return None
 
     dte = long_leg.dte
@@ -508,7 +526,7 @@ def _construct_bull_call_spread_technical(
         - _expected_option_value(stock_price, short_leg.strike, T, short_leg.iv, mu, is_put=False)
     )
     rr_ratio = round((ev_spread - net_debit) / net_debit, 2)
-    if rr_ratio < SPREAD_RR_MIN:
+    if rr_ratio < SPREAD_RR_MIN - (NEAR_MISS_RR_MARGIN if near_miss else 0.0):
         return None
 
     breakeven = long_leg.strike + net_debit
@@ -566,6 +584,7 @@ def _construct_bear_put_spread_technical(
     signal_count: int,
     signal_details: dict,
     atr14: float,
+    near_miss: bool = False,
 ) -> Optional[TechnicalSetup]:
     """Bear put spread: long 0.45Δ put, short 0.25Δ put, same expiry. R:R
     via the same expected-value model as the bull side — see
@@ -587,7 +606,8 @@ def _construct_bear_put_spread_technical(
         return None
 
     net_debit = round(long_leg.ask - short_leg.bid, 2)
-    if net_debit <= 0 or net_debit > spread_width * 0.40:
+    if net_debit <= 0 or net_debit > spread_width * (
+            NEAR_MISS_DEBIT_WIDTH_MAX if near_miss else STRICT_DEBIT_WIDTH_MAX):
         return None
 
     dte = long_leg.dte
@@ -601,7 +621,7 @@ def _construct_bear_put_spread_technical(
         - _expected_option_value(stock_price, short_leg.strike, T, short_leg.iv, mu, is_put=True)
     )
     rr_ratio = round((ev_spread - net_debit) / net_debit, 2)
-    if rr_ratio < SPREAD_RR_MIN:
+    if rr_ratio < SPREAD_RR_MIN - (NEAR_MISS_RR_MARGIN if near_miss else 0.0):
         return None
 
     breakeven = long_leg.strike - net_debit
@@ -660,6 +680,7 @@ def _pick_best_structure(
     signal_count: int,
     signal_details: dict,
     atr14: float,
+    near_miss: bool = False,
 ) -> Optional[TechnicalSetup]:
     """
     Choose the best options structure based on IV rank.
@@ -676,7 +697,7 @@ def _pick_best_structure(
         long_fn = _construct_long_put
         spread_fn = _construct_bear_put_spread_technical
 
-    args = (symbol, stock_price, chain, signal_count, signal_details, atr14)
+    args = (symbol, stock_price, chain, signal_count, signal_details, atr14, near_miss)
 
     if iv_rank < 50:
         return long_fn(*args) or spread_fn(*args)
@@ -943,11 +964,20 @@ def scan_technical_setups(
                 symbol, chain.stock_price, chain,
                 sig_direction, signal_count, details, atr,
             )
+            if setup is None:
+                # Strict pass found nothing — retry in the near-miss band so
+                # the forward test can see setups just past the gates.
+                setup = _pick_best_structure(
+                    symbol, chain.stock_price, chain,
+                    sig_direction, signal_count, details, atr, near_miss=True,
+                )
+                if setup is not None:
+                    setup.near_miss = True
             del chain  # free 280+ OptionContract objects immediately
             if setup is None:
                 logger.info("Technical scan: %s no structure met R:R >= %.1f", symbol, min_rr)
                 continue
-            if setup.rr_ratio < min_rr:
+            if not setup.near_miss and setup.rr_ratio < min_rr:
                 logger.info("Technical scan: %s structure rr=%.2f below min_rr=%.1f", symbol, setup.rr_ratio, min_rr)
                 continue
 

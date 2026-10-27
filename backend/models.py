@@ -292,6 +292,10 @@ class TechnicalSetup:
     short_occ: str = ""
     # See TradeSetup.entry_mid — `premium` is the worst-case fill, this is mid.
     entry_mid: Optional[float] = None
+    # True for a structure that missed the strict R:R/debit gates but cleared the
+    # near-miss band (technical_scanner.NEAR_MISS_*). Recorded for forward-test
+    # calibration only; never cached or shown.
+    near_miss: bool = False
     # 'consensus' (the 7-signal score) or '200w_bounce' (independent of it —
     # see technical_scanner._score_200w_bounce). The frontend renders each
     # with a different badge/fact panel; signal_details' shape differs too.

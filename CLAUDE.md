@@ -129,6 +129,23 @@ near-miss band:
 Every other gate is pass/fail with no "nearly" — failing one of those alone is
 still Tier C.
 
+**Near-miss recording.** The scanners' constructors used to `return None` on
+the soft gates (R:R, debit-to-width, breakeven, DTE), so a setup just past a
+gate was never recorded and the gates could not be calibrated. They now build
+setups inside a one-notch *calibration band* (`scanner.CALIB_*`,
+`technical_scanner.NEAR_MISS_*`); structural and liquidity exclusions (OI < 100,
+spread > 15%, no candidate strikes) stay hard. What is *shown* is unchanged:
+`main` still caches only setups that meet the old surfacing gates
+(`scanner.meets_surfacing_gates`; technical drops `near_miss`-flagged setups).
+`forward_test.select_for_recording` then records every Tier A/B plus at most
+`CALIBRATION_MAX_PER_SCAN` (5) Tier C that failed only tuning gates
+(rr/dte/breakeven, or quality inside the Tier B band), best quality first. Two
+limits: unanchored expiry selection searches 30-100 DTE, so the DTE band only
+opens upward (61-75) for signals without an anchor; and technical's EV-model
+single-leg R:R sat around a median of ~0.95 against a 2.0 gate when this was
+added, so `NEAR_MISS_RR_MARGIN` is 1.0 — read the forward-test rows by
+`gates_failed` before trusting any of the gates as correctly set.
+
 **Read the caveats below with every number this feature produces:**
 
 1. **Entry at the natural, exits on mid — the bias runs *against* the

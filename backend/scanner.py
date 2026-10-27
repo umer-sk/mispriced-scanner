@@ -31,6 +31,35 @@ RISK_FREE_RATE = 0.039
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Soft quality gates. The constructors used to `return None` on any of these,
+# so a setup that missed one was never recorded and the forward test could not
+# tell whether the gate was set right. They now only reject outside a
+# *calibration band* one notch wider than the gate: setups between the surfacing
+# gate and the band are built (and left for forward_test.classify to tier),
+# while main._run_scan still caches only setups that meet the surfacing gates
+# via meets_surfacing_gates(). Structural and liquidity exclusions (no
+# candidate strikes, debit <= 0, OI < 100, spread > 15%) stay hard returns:
+# an unfillable setup is not a near-miss and would pollute the forward test.
+SURFACE_RR_MIN = 2.0
+SURFACE_BREAKEVEN_MAX_PCT = 10.0
+SURFACE_DTE_MIN, SURFACE_DTE_MAX = 30, 60
+SURFACE_DEBIT_MAX = 8.0
+CALIB_RR_MIN = 1.5               # debit <= 40% of width <=> rr >= 1.5
+CALIB_DEBIT_WIDTH_MAX = 0.40
+CALIB_BREAKEVEN_MAX_PCT = 15.0
+CALIB_DTE_MIN, CALIB_DTE_MAX = 21, 75
+
+
+def meets_surfacing_gates(setup: "TradeSetup") -> bool:
+    """The bar a setup had to clear before the calibration band existed."""
+    return (
+        setup.rr_ratio >= SURFACE_RR_MIN
+        and setup.net_debit <= SURFACE_DEBIT_MAX
+        and setup.breakeven_move_pct <= SURFACE_BREAKEVEN_MAX_PCT
+        and SURFACE_DTE_MIN <= setup.dte <= SURFACE_DTE_MAX
+    )
+
+
 def _atm_contract(contracts: list[OptionContract], stock_price: float, dte_min: int = 0, dte_max: int = 105) -> Optional[OptionContract]:
     """Find the contract closest to ATM within DTE range."""
     candidates = [c for c in contracts if dte_min <= c.dte <= dte_max and c.bid > 0]
@@ -892,7 +921,7 @@ def construct_best_spread(
             short_leg = wider[0]
             spread_width = short_leg.strike - long_leg.strike
             net_debit = round(long_leg.ask - short_leg.bid, 2)
-        if net_debit <= 0 or net_debit > spread_width * 0.35:
+        if net_debit <= 0 or net_debit > spread_width * CALIB_DEBIT_WIDTH_MAX:
             return None
 
     max_gain = round(spread_width - net_debit, 2)
@@ -941,17 +970,17 @@ def construct_best_spread(
     )
 
     # STEP 6 — Quality gate (hard gate)
-    if rr_ratio < 2.0:
+    if rr_ratio < CALIB_RR_MIN:
         return None
-    if net_debit > 8.0:
+    if net_debit > SURFACE_DEBIT_MAX:
         return None
-    if breakeven_move_pct > 10.0:
+    if breakeven_move_pct > CALIB_BREAKEVEN_MAX_PCT:
         return None
     # Matches forward_test.py's DTE_MIN/DTE_MAX exactly — the two bands move
     # together, or this constructor can emit setups the forward test will
     # always Tier-C on a pure timing mismatch that has nothing to do with
     # trade quality.
-    if not (30 <= dte <= 60):
+    if not (CALIB_DTE_MIN <= dte <= CALIB_DTE_MAX):
         return None
 
     # STEP 7 — Broker order string
@@ -1101,7 +1130,7 @@ def construct_bear_put_spread(
     net_debit = round(long_leg.ask - short_leg.bid, 2)
     if net_debit <= 0:
         return None
-    if net_debit > spread_width * 0.35:
+    if net_debit > spread_width * CALIB_DEBIT_WIDTH_MAX:
         return None
 
     max_gain = round(spread_width - net_debit, 2)
@@ -1171,10 +1200,11 @@ def construct_bear_put_spread(
     )
 
     # STEP 6 — Quality gates
-    if rr_ratio < 2.0 or net_debit > 8.0 or breakeven_move_pct > 10.0:
+    if (rr_ratio < CALIB_RR_MIN or net_debit > SURFACE_DEBIT_MAX
+            or breakeven_move_pct > CALIB_BREAKEVEN_MAX_PCT):
         return None
     # See construct_best_spread — matches forward_test.py's DTE band exactly.
-    if not (30 <= dte <= 60):
+    if not (CALIB_DTE_MIN <= dte <= CALIB_DTE_MAX):
         return None
 
     # STEP 7 — Order string
